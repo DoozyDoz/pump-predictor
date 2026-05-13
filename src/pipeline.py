@@ -117,8 +117,10 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0):
     if alerts:
         _write_csv(alerts)
         _print_terminal(alerts, portfolio_usd)
+        _send_telegram(alerts, portfolio_usd)
     else:
         print("No pump alerts today.")
+        _send_telegram([], portfolio_usd)  # optionally silence no-alert days
     return alerts
 
 
@@ -320,6 +322,21 @@ def _build_alerts(fund, oi, ls, taker, book, qual_profiles, run_ts, portfolio_us
         _persist_alert(sym, adjusted_score, fired, run_ts)
 
     return alerts
+
+
+def _send_telegram(alerts, portfolio_usd):
+    """Send alerts via Telegram if configured."""
+    from src.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    from src.notify import TelegramNotifier
+    try:
+        notifier = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+        msg = notifier.format_alerts(alerts, portfolio_usd)
+        ok = notifier.send(msg)
+        print(f"Telegram: {'sent' if ok else 'failed'}")
+    except Exception as e:
+        print(f"Telegram error: {e}")
 
 
 def _persist_alert(sym, score, fired, run_ts):

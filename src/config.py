@@ -5,6 +5,8 @@ load_dotenv()
 
 COINALYZE_API_KEY = os.getenv("COINALYZE_API_KEY")
 DUNE_API_KEY = os.getenv("DUNE_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 COINALYZE_BASE = "https://api.coinalyze.net/v1"
 
