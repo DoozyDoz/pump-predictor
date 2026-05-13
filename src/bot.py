@@ -18,8 +18,8 @@ from src.db import db_session, init_db
 API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 BINANCE_TICKER = "https://api.binance.com/api/v3/ticker/price"
 POLL_INTERVAL = 2       # seconds between Telegram polls
-PRICE_INTERVAL = 3600   # hourly P&L update (seconds)
-TP_CHECK_INTERVAL = 300 # check TP/SL every 5 minutes (seconds)
+PRICE_INTERVAL = 7200   # P&L update every 2 hours (seconds)
+TP_CHECK_INTERVAL = 1800  # check TP/SL every 30 minutes (seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +262,8 @@ def handle_message(msg: dict):
             "• <code>positions</code> — show all active positions\n"
             "• <code>help</code> — this message\n\n"
             "<b>Auto-alerts:</b>\n"
-            "• Hourly P&L update for all positions\n"
+            "• P&L update every 2 hours\n"
+            "• TP/SL checked every 30 minutes\n"
             "• Instant alert when TP1 (+15%), TP2 (+25%), or stop-loss (-7%) hit\n"
             "• Trailing stop (-3%) after TP1 hit\n\n"
             "<i>Example: buy COS at 0.00123</i>"
@@ -303,7 +304,7 @@ def handle_message(msg: dict):
                         f"Size: ${size:.0f}\n"
                         f"TP1: ${tp1:.6f} (+15%) | TP2: ${tp2:.6f} (+25%)\n"
                         f"Stop: ${stop:.6f} (-7%) | Trail: -3% after TP1\n"
-                        f"<i>Updates every hour. Reply 'close {sym}' to stop.</i>"
+                        f"<i>Updates every 2 hours. Reply 'close {sym}' to stop.</i>"
                     )
             else:
                 send_message(chat_id, f"❌ Could not parse price. Use: <code>buy {sym} at 0.0012</code>")
