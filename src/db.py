@@ -94,6 +94,23 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     UNIQUE(symbol, exchange, interval, timestamp)
 );
 
+CREATE TABLE IF NOT EXISTS paper_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id INTEGER REFERENCES tokens(id),
+    symbol TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    entry_ts TEXT NOT NULL,
+    exit_price REAL,
+    exit_ts TEXT,
+    exit_reason TEXT,  -- 'manual', 'tp1', 'tp2', 'trailing', 'stop_loss', 'timeout'
+    pnl_pct REAL,
+    position_size_usd REAL NOT NULL DEFAULT 100.0,
+    status TEXT NOT NULL DEFAULT 'active',  -- 'active', 'tp1_hit', 'closed'
+    tp1 REAL, tp2 REAL, stop REAL, trail_peak REAL,
+    chat_id TEXT NOT NULL,
+    alert_triggered_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS backtest_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_ts TEXT NOT NULL DEFAULT (datetime('now')),

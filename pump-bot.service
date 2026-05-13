@@ -1,0 +1,14 @@
+[Unit]
+Description=Alpha Pump Predictor Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=muhammad
+WorkingDirectory=/home/muhammad/pump-predictor
+ExecStart=/home/muhammad/pump-predictor/run_bot.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
