@@ -1,0 +1,224 @@
+"""
+Qualitative signal detection framework for Phase 2.
+
+Monitors external sources for catalyst events that precede pumps:
+- Governance proposals (Snapshot, Tally)
+- Token unlocks & supply events (CoinGecko, TokenUnlocks)
+- Exchange listings & trading pairs
+- Social momentum (X/Twitter, Telegram, Reddit growth)
+- Developer activity (GitHub commits, releases)
+
+Each signal is stored as a tag with:
+- source: where it was detected
+- confidence: 0-1 how reliable this signal type is
+- lead_time_hours: typical time from signal to pump
+"""
+
+from datetime import datetime, timedelta
+from typing import Optional
+from dataclasses import dataclass, field
+import requests
+import json
+
+# ---------------------------------------------------------------------------
+# Catalyst signal types — ranked by historical predictive power
+# ---------------------------------------------------------------------------
+CATALYST_TYPES = {
+    "governance_proposal": {
+        "label": "Governance Proposal",
+        "confidence": 0.6,
+        "lead_time_hours": 72,  # proposals usually known days before votes
+        "sources": ["snapshot.org", "tally.xyz", "project forums"],
+        "look_for": ["fee switch", "token burn", "emissions cut", "treasury buyback", "protocol upgrade"],
+    },
+    "token_unlock": {
+        "label": "Token Unlock Event",
+        "confidence": 0.5,
+        "lead_time_hours": 168,  # unlocks are scheduled weeks ahead
+        "sources": ["tokenunlocks.app", "coingecko events", "project docs"],
+        "look_for": ["cliff unlock passed", "linear emission ending", "supply squeeze after unlock"],
+    },
+    "exchange_listing": {
+        "label": "Exchange Listing",
+        "confidence": 0.8,
+        "lead_time_hours": 24,
+        "sources": ["binance announcements", "coinbase listings", "exchange blogs"],
+        "look_for": ["new spot listing", "new perp pair", "new chain support"],
+    },
+    "mainnet_upgrade": {
+        "label": "Mainnet/Protocol Upgrade",
+        "confidence": 0.5,
+        "lead_time_hours": 168,
+        "sources": ["github releases", "project blog", "dev docs"],
+        "look_for": ["mainnet launch", "v2/v3 upgrade", "new SDK", "bridge deployment"],
+    },
+    "partnership": {
+        "label": "Partnership / Integration",
+        "confidence": 0.4,
+        "lead_time_hours": 48,
+        "sources": ["project blog", "partner announcements", "chain official accounts"],
+        "look_for": ["enterprise partnership", "protocol integration", "grant award"],
+    },
+    "social_momentum": {
+        "label": "Social Momentum",
+        "confidence": 0.3,
+        "lead_time_hours": 12,
+        "sources": ["x.com trending", "telegram growth", "reddit mentions", "lunarcrush"],
+        "look_for": ["follower spike", "mention surge", "sentiment shift positive", "KOL endorsement"],
+    },
+    "onchain_anomaly": {
+        "label": "On-Chain Anomaly",
+        "confidence": 0.7,
+        "lead_time_hours": 48,
+        "sources": ["nansen", "arkham", "dune"],
+        "look_for": ["whale wallet accumulation", "exchange outflow spike", "new wallet cluster"],
+    },
+    "sector_rotation": {
+        "label": "Sector / Narrative Rotation",
+        "confidence": 0.3,
+        "lead_time_hours": 72,
+        "sources": ["messari", "delphi", "the block", "coindesk"],
+        "look_for": ["sector outperforming", "narrative shift", "regulatory clarity", "institutional flow"],
+    },
+}
+
+
+@dataclass
+class QualitativeTag:
+    token_symbol: str
+    catalyst_type: str
+    description: str
+    source: str
+    confidence: float
+    detected_at: str
+    lead_time_hours: int
+    url: Optional[str] = None
+
+
+@dataclass
+class TokenQualitativeProfile:
+    symbol: str
+    tags: list[QualitativeTag] = field(default_factory=list)
+    qualitative_boost: float = 0.0  # -1.0 to +1.0 modifier on Pump Score
+
+    def add_tag(self, tag: QualitativeTag):
+        self.tags.append(tag)
+        # Stacking: sum of confidences, capped at 1.0.
+        # Two 0.5 signals = 1.0 (same as one 1.0 signal).
+        # This rewards multiple weak signals converging on the same token.
+        self.qualitative_boost = min(1.0, sum(t.confidence for t in self.tags))
+
+    def recent_tags(self, hours: int = 168) -> list[QualitativeTag]:
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        return [t for t in self.tags
+                if datetime.fromisoformat(t.detected_at) > cutoff]
+
+
+# ---------------------------------------------------------------------------
+# Data source integrations (free/cheap where possible)
+# ---------------------------------------------------------------------------
+
+def check_defillama_metrics(protocol_slug: str) -> Optional[dict]:
+    """Check DeFiLlama for TVL, revenue, and volume trends."""
+    try:
+        resp = requests.get(f"https://api.llama.fi/protocol/{protocol_slug}", timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                "tvl": data.get("tvl"),
+                "change_7d": data.get("change_7d"),
+                "change_1m": data.get("change_1m"),
+                "revenue_7d": data.get("revenue7d"),
+                "volume_7d": data.get("volume7d"),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def check_snapshot_proposals(space_id: str, since_days: int = 14) -> list[dict]:
+    """Query Snapshot.org GraphQL for recent proposals in a DAO space."""
+    query = """
+    query Proposals($space: String!, $since: Int!) {
+      proposals(
+        first: 10
+        where: { space: $space, created_gte: $since }
+        orderBy: "created"
+        orderDirection: desc
+      ) {
+        id title state end scores_total created
+      }
+    }
+    """
+    since_ts = int((datetime.utcnow() - timedelta(days=since_days)).timestamp())
+    try:
+        resp = requests.post("https://hub.snapshot.org/graphql",
+                             json={"query": query, "variables": {"space": space_id, "since": since_ts}},
+                             timeout=15)
+        if resp.status_code == 200:
+            return resp.json().get("data", {}).get("proposals", [])
+    except Exception:
+        pass
+    return []
+
+
+def check_github_activity(repo: str, since_days: int = 30) -> Optional[dict]:
+    """Check GitHub for recent commits and releases."""
+    try:
+        resp = requests.get(f"https://api.github.com/repos/{repo}/releases?per_page=3", timeout=15)
+        releases = resp.json() if resp.status_code == 200 else []
+        resp2 = requests.get(f"https://api.github.com/repos/{repo}/commits?per_page=5", timeout=15)
+        commits = resp2.json() if resp2.status_code == 200 else []
+        return {
+            "recent_releases": len(releases),
+            "latest_release": releases[0].get("tag_name") if releases else None,
+            "release_date": releases[0].get("published_at") if releases else None,
+            "recent_commits": len(commits),
+            "commit_dates": [c.get("commit", {}).get("author", {}).get("date") for c in commits[:5]],
+        }
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Scoring integration
+# ---------------------------------------------------------------------------
+
+def compute_qualitative_boost(profile: TokenQualitativeProfile) -> float:
+    """
+    Compute qualitative boost for a token.
+    Returns -1.0 to +1.0 to modify the Pump Score.
+
+    High confidence signals (listing, on-chain, governance) provide strong boost.
+    Low confidence signals (social, sector) provide weak boost.
+    Multiple weak signals can stack to match one strong signal.
+    """
+    recent = profile.recent_tags(hours=168)  # last 7 days
+    if not recent:
+        return 0.0
+
+    # Weighted sum: high-confidence signals count more
+    weighted = sum(t.confidence * max(0, 1.0 - (t.lead_time_hours - 24) / 168)
+                   for t in recent if t.lead_time_hours > 0)
+
+    # Cap at 1.0
+    return min(1.0, max(-1.0, weighted))
+
+
+def qualitative_override(pump_score: int, boost: float, threshold: int = 2) -> tuple[int, str]:
+    """
+    Apply qualitative boost to Pump Score.
+
+    - If Pump Score ≥ threshold: qualitative may override a near-miss (score = threshold-1)
+    - If boost ≥ 0.8 (e.g., confirmed CEX listing): auto-alert even with score = 0
+    - If boost ≤ -0.5 (e.g., unlock dump incoming): suppress alert
+
+    Returns (adjusted_score, reason).
+    """
+    if boost >= 0.8:
+        return max(pump_score, threshold), "high-confidence catalyst overrides score"
+    if boost >= 0.5 and pump_score >= threshold - 1:
+        return pump_score + 1, "qualitative boost pushes near-miss over threshold"
+    if boost <= -0.5 and pump_score >= threshold:
+        return threshold - 1, "negative catalyst suppresses alert"
+    return pump_score, ""

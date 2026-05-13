@@ -1,0 +1,68 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+COINALYZE_API_KEY = os.getenv("COINALYZE_API_KEY")
+DUNE_API_KEY = os.getenv("DUNE_API_KEY")
+
+COINALYZE_BASE = "https://api.coinalyze.net/v1"
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "pump.db")
+
+UNIVERSE_SIZE = 150
+MIN_DAILY_VOLUME_USD = 1_000_000
+UNIVERSE_REFRESH_DAY = "Monday"
+
+PUMP_THRESHOLD_PCT = 15.0
+PUMP_WINDOW_HOURS = 24
+LOOKAHEAD_HOURS = 48
+
+FUNDING_PERCENTILE = 2.0
+FUNDING_CROSS_SECTIONAL_PCT = 5.0
+FUNDING_HISTORY_DAYS = 90
+
+OI_DIVERGENCE_LOOKBACK_DAYS = 7
+OI_DIVERGENCE_HISTORY_DAYS = 90
+OI_DIVERGENCE_PERCENTILE = 95  # top 5% of OI/price divergence
+OI_DIVERGENCE_CROSS_SECTIONAL_PCT = 5.0
+OI_PRICE_MAX_RISE_PCT = 5.0  # price must not have already pumped
+
+LS_RATIO_HISTORY_DAYS = 90
+LS_RATIO_PERCENTILE = 2.0  # bottom 2% = extreme bearish sentiment
+LS_RATIO_CROSS_SECTIONAL_PCT = 5.0
+
+TAKER_RATIO_HISTORY_MS = 21 * 86400_000  # 21 days in ms
+TAKER_RATIO_PERCENTILE = 2.0  # bottom 2% = too many sellers = bullish
+TAKER_RATIO_CROSS_SECTIONAL_PCT = 5.0
+
+ORDER_BOOK_LEVELS = 10
+ORDER_BOOK_CROSS_SECTIONAL_PCT = 5.0  # top 5% bid dominance = bullish
+
+# Legacy — now using OI divergence + LS ratio instead of on-chain
+WALLET_GROWTH_PCT = 5.0
+WALLET_MIN_BALANCE_USD = 1000
+WALLET_WINDOW_HOURS = 48
+CEX_OUTFLOW_STD = 2.0
+CEX_RATIO_THRESHOLD = 2.0
+CEX_WINDOW_DAYS = 30
+
+ALERT_THRESHOLD = 2  # signals out of 5 (≥2 fires alert)
+
+POSITION_SIZE_PCT = 0.10
+MAX_CONCURRENT = 5
+STOP_LOSS_PCT = -0.07
+TAKE_PROFIT_1_PCT = 0.15
+TAKE_PROFIT_1_PCT_SHARE = 0.50
+TAKE_PROFIT_2_PCT = 0.25
+TAKE_PROFIT_2_PCT_SHARE = 0.30
+TRAILING_STOP_PCT = 0.03
+
+GO_PRECISION = 0.50
+GO_PROFIT_FACTOR = 1.5
+
+API_DELAY = 0.25  # seconds between API calls to avoid rate limits
+
+BACKTEST_YEARS = 2
+BACKTEST_TRAIN_MONTHS = 6
+BACKTEST_TEST_MONTHS = 1
