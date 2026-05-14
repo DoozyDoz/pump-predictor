@@ -73,10 +73,13 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0):
 
     funding_present = [(s, all_funding_rates[s]) for s in symbols
                        if s in all_funding_rates]
+    # Deep-check ALL tokens with funding data. The old Coinalyze-era
+    # optimization (only negative funding) is no longer needed with Binance.
+    # Funding is contrarian only — it doesn't need to fire for a buy.
+    deep_check_syms = [s for s, _ in funding_present]
     neg_funding_syms = [s for s, r in funding_present if r < 0]
-    deep_check_syms = neg_funding_syms[:50]
     print(f"Pre-filter: {len(funding_present)} with funding, {len(neg_funding_syms)} negative, "
-          f"deep-checking {len(deep_check_syms)}")
+          f"deep-checking all {len(deep_check_syms)}")
 
     # ---- Quantitative signals ----
     # S1: Funding-rate extreme (all tokens)

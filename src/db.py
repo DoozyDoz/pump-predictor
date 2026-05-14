@@ -30,30 +30,6 @@ CREATE TABLE IF NOT EXISTS funding_rates (
 );
 CREATE INDEX IF NOT EXISTS idx_funding_token_ts ON funding_rates(token_id, timestamp);
 
-CREATE TABLE IF NOT EXISTS signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_id INTEGER NOT NULL REFERENCES tokens(id),
-    run_ts TEXT NOT NULL DEFAULT (datetime('now')),
-    wallet_growth_pct REAL,
-    wallet_growth_fired BOOLEAN,
-    funding_percentile REAL,
-    funding_cross_sectional_pct REAL,
-    funding_fired BOOLEAN,
-    cex_net_outflow_std REAL,
-    cex_outflow_ratio REAL,
-    cex_fired BOOLEAN,
-    pump_score INTEGER GENERATED ALWAYS AS (
-        COALESCE(wallet_growth_fired, 0) +
-        COALESCE(funding_fired, 0) +
-        COALESCE(cex_fired, 0)
-    ) VIRTUAL,
-    alert_triggered BOOLEAN GENERATED ALWAYS AS (
-        COALESCE(wallet_growth_fired, 0) +
-        COALESCE(funding_fired, 0) +
-        COALESCE(cex_fired, 0) >= 2
-    ) VIRTUAL
-);
-
 CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_id INTEGER NOT NULL REFERENCES tokens(id),
@@ -107,6 +83,8 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     position_size_usd REAL NOT NULL DEFAULT 100.0,
     status TEXT NOT NULL DEFAULT 'active',  -- 'active', 'tp1_hit', 'closed'
     tp1 REAL, tp2 REAL, stop REAL, trail_peak REAL,
+    tp1_filled REAL DEFAULT 0,  -- fraction filled at TP1 (0 or 0.5)
+    realized_pnl REAL DEFAULT 0,  -- accumulated P&L from partial fills
     chat_id TEXT NOT NULL,
     alert_triggered_at TEXT
 );
@@ -169,3 +147,12 @@ def db_session():
 def init_db():
     with db_session() as conn:
         conn.executescript(SCHEMA)
+        # Migrations for columns added after initial schema
+        for col, col_def in [
+            ("tp1_filled", "REAL DEFAULT 0"),
+            ("realized_pnl", "REAL DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {col_def}")
+            except Exception:
+                pass  # column already exists

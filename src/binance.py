@@ -71,15 +71,6 @@ def get_24h_tickers() -> list[dict]:
     return _get(f"{BINANCE_SPOT}/api/v3/ticker/24hr")
 
 
-def get_open_interest(symbol: str) -> float | None:
-    """Get current futures open interest."""
-    data = _get(f"{BINANCE_FAPI}/fapi/v1/openInterest", {"symbol": symbol.upper()})
-    if isinstance(data, dict):
-        oi = data.get("openInterest")
-        return float(oi) if oi else None
-    return None
-
-
 def compute_order_book_imbalance(depth: dict, levels: int = 10) -> float:
     """
     Compute bid dominance from order book depth.

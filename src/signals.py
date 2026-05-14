@@ -369,13 +369,14 @@ def _merge_histories(binance: list[dict], local: list[dict],
     """Merge Binance history with local snapshots, dedup by timestamp."""
     if not local:
         return binance
-    seen = {c["t"] for c in binance if c.get("t")}
+    result = list(binance)
+    seen = {c["t"] for c in result if c.get("t")}
     for snap in local:
-        if snap.get("t") and snap["t"] not in seen:
-            binance.append(snap)
+        if snap.get("t") and snap["t"] not in seen and snap.get(key) is not None:
+            result.append(snap)
             seen.add(snap["t"])
-    binance.sort(key=lambda c: c.get("t", 0))
-    return binance
+    result.sort(key=lambda c: c.get("t", 0))
+    return result
 
 
 def _last_close(candles: list[dict]) -> Optional[float]:
@@ -525,7 +526,7 @@ def finalize_taker_signals(signals: list[TakerRatioSignal]) -> list[TakerRatioSi
 # Signal 5: Order book imbalance (Binance spot) — multi-snapshot persistence
 # ============================================================================
 ORDER_BOOK_SNAPSHOTS = 3
-ORDER_BOOK_SNAPSHOT_INTERVAL = 5  # seconds between snapshots
+ORDER_BOOK_SNAPSHOT_INTERVAL = 3  # seconds between snapshots
 
 
 @_dc

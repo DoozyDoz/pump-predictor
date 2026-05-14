@@ -72,17 +72,21 @@ def open_position(symbol: str, entry_price: float, chat_id: str, size_usd: float
 
 
 def close_position(trade_id: int, exit_price: float, reason: str = "manual") -> dict | None:
-    """Close a paper trade and return summary."""
+    """Close a paper trade and return summary. Accounts for TP1 partial fills."""
     with db_session() as conn:
         row = conn.execute("""
-            SELECT symbol, entry_price, position_size_usd, status FROM paper_trades WHERE id = ?
+            SELECT symbol, entry_price, position_size_usd, status,
+                   COALESCE(tp1_filled, 0) as tp1_filled,
+                   COALESCE(realized_pnl, 0) as realized_pnl
+            FROM paper_trades WHERE id = ?
         """, (trade_id,)).fetchone()
         if not row:
             return None
         if row["status"] == "closed":
             return {"symbol": row["symbol"], "error": "already closed"}
 
-        pnl = ((exit_price - row["entry_price"]) / row["entry_price"]) * 100
+        remaining = 1.0 - row["tp1_filled"]
+        pnl = row["realized_pnl"] + remaining * ((exit_price - row["entry_price"]) / row["entry_price"]) * 100
         now = datetime.utcnow().isoformat()
         conn.execute("""
             UPDATE paper_trades SET exit_price = ?, exit_ts = ?, exit_reason = ?,
@@ -101,7 +105,9 @@ def close_position(trade_id: int, exit_price: float, reason: str = "manual") -> 
 def get_active_positions(chat_id: str) -> list[dict]:
     with db_session() as conn:
         rows = conn.execute("""
-            SELECT * FROM paper_trades WHERE chat_id = ? AND status IN ('active', 'tp1_hit')
+            SELECT *, COALESCE(tp1_filled, 0) as tp1_filled,
+                   COALESCE(realized_pnl, 0) as realized_pnl
+            FROM paper_trades WHERE chat_id = ? AND status IN ('active', 'tp1_hit')
             ORDER BY entry_ts
         """, (chat_id,)).fetchall()
     return [dict(r) for r in rows]
@@ -138,13 +144,19 @@ def check_positions(chat_id: str):
             continue
 
         entry = p["entry_price"]
-        pnl = ((price - entry) / entry) * 100
         tid = p["id"]
         status = p["status"]
         tp1 = p["tp1"]
         tp2 = p["tp2"]
         stop = p["stop"]
         peak = p["trail_peak"] or entry
+        tp1_filled = p.get("tp1_filled") or 0
+        realized = p.get("realized_pnl") or 0
+
+        # Blended P&L: realized from partial fills + remaining position
+        remaining = 1.0 - tp1_filled
+        unrealized = remaining * ((price - entry) / entry) * 100
+        pnl = realized + unrealized
 
         # Update trail peak
         if price > peak:
@@ -156,26 +168,30 @@ def check_positions(chat_id: str):
 
         lines.append(f"<b>{sym}</b>: ${price:.6f} | P&L: {pnl:+.1f}% | Entry: ${entry:.6f}")
 
-        # Check TP1
+        # Check TP1 — record partial fill
         if status == "active" and price >= tp1:
             with db_session() as conn:
-                conn.execute("UPDATE paper_trades SET status = 'tp1_hit' WHERE id = ?", (tid,))
+                conn.execute("""
+                    UPDATE paper_trades SET status = 'tp1_hit',
+                    tp1_filled = 0.5, realized_pnl = 0.5 * ?
+                    WHERE id = ?
+                """, (TAKE_PROFIT_1_PCT * 100, tid))
             alerts.append(f"<b>🎯 TP1 HIT — {sym}</b>\n  50% taken at +15% (${tp1:.6f})\n  Trailing -3% on remaining 50%")
 
-        # Check TP2 (only if tp1 was hit — uses tp1_hit status)
+        # Check TP2 (only if tp1 was hit)
         if status == "tp1_hit" and price >= tp2:
             close_position(tid, tp2, "tp2")
-            alerts.append(f"<b>🎯 TP2 HIT — {sym}</b>\n  30% taken at +25% (${tp2:.6f})\n  20% remains trailing -3%")
+            alerts.append(f"<b>🎯 TP2 HIT — {sym}</b>\n  Remaining 50% closed at +25% (${tp2:.6f})")
 
         # Check trailing stop
         if status == "tp1_hit" and price <= trail_stop:
             close_position(tid, trail_stop, "trailing")
-            alerts.append(f"<b>📉 TRAILING STOP — {sym}</b>\n  Closed at ${trail_stop:.6f}\n  P&L: {((trail_stop - entry) / entry) * 100:+.1f}%")
+            alerts.append(f"<b>📉 TRAILING STOP — {sym}</b>\n  Closed at ${trail_stop:.6f}")
 
         # Check stop-loss
         if status == "active" and price <= stop:
             close_position(tid, stop, "stop_loss")
-            alerts.append(f"<b>🛑 STOP LOSS — {sym}</b>\n  Closed at ${stop:.6f}\n  P&L: {(STOP_LOSS_PCT * 100):.1f}%")
+            alerts.append(f"<b>🛑 STOP LOSS — {sym}</b>\n  Closed at ${stop:.6f}")
 
     # Send position summary
     send_message(chat_id, "\n".join(lines))
@@ -232,14 +248,18 @@ def handle_message(msg: dict):
             sym = p["symbol"].replace("USDT", "")
             price = get_price(sym)
             if price:
-                pnl = ((price - p["entry_price"]) / p["entry_price"]) * 100
+                tp1_filled = p.get("tp1_filled") or 0
+                realized = p.get("realized_pnl") or 0
+                remaining = 1.0 - tp1_filled
+                pnl = realized + remaining * ((price - p["entry_price"]) / p["entry_price"]) * 100
                 lines.append(
                     f"<b>{sym}</b>: ${price:.6f} | P&L: {pnl:+.1f}% | "
                     f"Entry: ${p['entry_price']:.6f} | Size: ${p['position_size_usd']:.0f}"
                 )
+                status_extra = " (50% filled)" if tp1_filled > 0 else ""
                 lines.append(
                     f"  TP1: ${p['tp1']:.6f} | TP2: ${p['tp2']:.6f} | "
-                    f"Stop: ${p['stop']:.6f} | Status: {p['status']}"
+                    f"Stop: ${p['stop']:.6f} | Status: {p['status']}{status_extra}"
                 )
             else:
                 lines.append(f"<b>{sym}</b>: price unavailable")
