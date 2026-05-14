@@ -111,6 +111,17 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     alert_triggered_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS signal_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    signal_type TEXT NOT NULL,  -- 'funding_rate', 'oi_value', 'ls_ratio', 'taker_ratio'
+    value REAL NOT NULL,
+    snapshot_ts TEXT NOT NULL,  -- ISO date (YYYY-MM-DD)
+    UNIQUE(symbol, signal_type, snapshot_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_lookup
+    ON signal_snapshots(symbol, signal_type, snapshot_ts);
+
 CREATE TABLE IF NOT EXISTS backtest_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_ts TEXT NOT NULL DEFAULT (datetime('now')),

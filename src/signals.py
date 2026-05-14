@@ -6,11 +6,13 @@ Signal 2: Open Interest / Price divergence (rising OI + flat price = accumulatio
 Signal 3: Long/Short ratio extreme (contrarian — low ratio = too bearish = bullish)
 Signal 4: Taker buy/sell ratio extreme (contrarian — low ratio = too many sellers = bullish)
 Signal 5: Order book imbalance (high bid dominance = support = bullish)
+
+All data from Binance public APIs (spot + fapi + futures/data).
 """
 
 from datetime import datetime, timedelta
 from typing import Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field as _dc_field
 from src.config import (
     FUNDING_PERCENTILE, FUNDING_CROSS_SECTIONAL_PCT, FUNDING_HISTORY_DAYS,
     OI_DIVERGENCE_LOOKBACK_DAYS, OI_DIVERGENCE_HISTORY_DAYS,
@@ -18,11 +20,10 @@ from src.config import (
     OI_PRICE_MAX_RISE_PCT,
     LS_RATIO_HISTORY_DAYS, LS_RATIO_PERCENTILE, LS_RATIO_CROSS_SECTIONAL_PCT,
 )
-from src.coinalyze import (
+from src.binance import (
     get_funding_rate, get_funding_rate_history,
-    get_open_interest_history, get_ohlcv_history,
-    get_long_short_ratio_history,
-    spot_to_perp, CoinAnalyzeError,
+    get_open_interest_history, get_klines,
+    get_global_ls_ratio_history,
 )
 
 
@@ -65,30 +66,34 @@ class LSRatioSignal:
 # Signal 1: Funding-rate extreme
 # ---------------------------------------------------------------------------
 def compute_funding_signal(spot_symbol: str) -> Optional[FundingSignal]:
-    perp_sym = spot_to_perp(spot_symbol)
+    """Binance: spot and perp symbols are the same (e.g. BTCUSDT)."""
     try:
-        current_rate = get_funding_rate(perp_sym)
-    except CoinAnalyzeError:
+        current_rate = get_funding_rate(spot_symbol)
+    except Exception:
         return None
     if current_rate is None:
         return None
 
-    to_dt = datetime.utcnow()
-    from_dt = to_dt - timedelta(days=FUNDING_HISTORY_DAYS)
     try:
-        candles = get_funding_rate_history(perp_sym, from_dt=from_dt, to_dt=to_dt)
-    except CoinAnalyzeError:
-        return None
-    if not candles:
+        candles = get_funding_rate_history(spot_symbol, limit=500)
+    except Exception:
         return None
 
-    rates = [c["c"] for c in candles if "c" in c]
+    # Merge local snapshot history (grows over time, fills gaps beyond Binance window)
+    from src.snapshots import get_snapshot_history
+    local = get_snapshot_history(spot_symbol, "funding_rate", since_days=90)
+    merged = _merge_histories(candles or [], local, key="c")
+
+    if not merged:
+        return None
+
+    rates = [c["c"] for c in merged if "c" in c]
     if not rates:
         return None
 
     percentile = (sum(1 for r in rates if r <= current_rate) / len(rates)) * 100
     return FundingSignal(
-        symbol=spot_symbol, perp_symbol=perp_sym,
+        symbol=spot_symbol, perp_symbol=spot_symbol,
         current_rate=current_rate, percentile_90d=percentile,
         cross_sectional_pct=0.0,
     )
@@ -125,22 +130,24 @@ def compute_oi_divergence_signal(spot_symbol: str) -> Optional[OIDivergenceSigna
     Compute OI/price divergence.
     Bullish when OI rises while price stays flat or falls (accumulation).
     """
-    perp_sym = spot_to_perp(spot_symbol)
     to_dt = datetime.utcnow()
     from_dt = to_dt - timedelta(days=OI_DIVERGENCE_HISTORY_DAYS)
 
-    # Get OI history
+    # OI from Binance futures/data + local snapshots
     try:
-        oi_candles = get_open_interest_history(perp_sym, from_dt=from_dt, to_dt=to_dt)
-    except CoinAnalyzeError:
-        return None
+        oi_candles = get_open_interest_history(spot_symbol, period="4h", limit=500)
+    except Exception:
+        oi_candles = []
+    from src.snapshots import get_snapshot_history
+    oi_local = get_snapshot_history(spot_symbol, "oi_value", since_days=90)
+    oi_candles = _merge_histories(oi_candles or [], oi_local, key="c")
     if not oi_candles:
         return None
 
-    # Get spot price history
+    # Price from Binance spot klines
     try:
-        price_candles = get_ohlcv_history(spot_symbol, from_dt=from_dt, to_dt=to_dt, interval="4hour")
-    except CoinAnalyzeError:
+        price_candles = get_klines(spot_symbol, interval="4h", limit=500, market="spot")
+    except Exception:
         return None
     if not price_candles:
         return None
@@ -159,7 +166,7 @@ def compute_oi_divergence_signal(spot_symbol: str) -> Optional[OIDivergenceSigna
     percentile = (sum(1 for d in div_history if d <= divergence) / len(div_history)) * 100
 
     return OIDivergenceSignal(
-        symbol=spot_symbol, perp_symbol=perp_sym,
+        symbol=spot_symbol, perp_symbol=spot_symbol,
         oi_change_pct=oi_change, price_change_pct=price_change,
         divergence=divergence, percentile_90d=percentile,
         cross_sectional_pct=0.0,
@@ -241,14 +248,13 @@ def compute_ls_ratio_signal(spot_symbol: str) -> Optional[LSRatioSignal]:
     Compute long/short ratio extreme signal.
     Extremely low ratio = crowd is bearish = contrarian bullish.
     """
-    perp_sym = spot_to_perp(spot_symbol)
-    to_dt = datetime.utcnow()
-    from_dt = to_dt - timedelta(days=LS_RATIO_HISTORY_DAYS)
-
     try:
-        candles = get_long_short_ratio_history(perp_sym, from_dt=from_dt, to_dt=to_dt, interval="4hour")
-    except CoinAnalyzeError:
-        return None
+        candles = get_global_ls_ratio_history(spot_symbol, period="4h", limit=500)
+    except Exception:
+        candles = []
+    from src.snapshots import get_snapshot_history
+    local = get_snapshot_history(spot_symbol, "ls_ratio", since_days=90)
+    candles = _merge_histories(candles or [], local, key="r")
     if not candles:
         return None
 
@@ -260,7 +266,7 @@ def compute_ls_ratio_signal(spot_symbol: str) -> Optional[LSRatioSignal]:
     percentile = (sum(1 for r in ratios[:-1] if r <= current_ratio) / (len(ratios) - 1)) * 100
 
     return LSRatioSignal(
-        symbol=spot_symbol, perp_symbol=perp_sym,
+        symbol=spot_symbol, perp_symbol=spot_symbol,
         current_ratio=current_ratio, percentile_90d=percentile,
         cross_sectional_pct=0.0,
     )
@@ -296,7 +302,7 @@ def compute_funding_signal_backtest(
     percentile = (sum(1 for r in past if r <= current_rate) / len(past)) * 100
     universe = list(all_rates_snapshot.values())
     cross = (sum(1 for r in universe if r <= current_rate) / len(universe)) * 100 if universe else 100.0
-    perp = spot_to_perp(spot_symbol)
+    perp = spot_symbol  # Binance: spot and perp symbols are identical
     return FundingSignal(
         symbol=spot_symbol, perp_symbol=perp,
         current_rate=current_rate, percentile_90d=percentile,
@@ -320,7 +326,7 @@ def compute_oi_divergence_backtest(
     percentile = (sum(1 for d in div_history if d <= divergence) / len(div_history)) * 100
     all_divs = list(all_divergences.values())
     cross = (sum(1 for d in all_divs if d <= divergence) / len(all_divs)) * 100 if all_divs else 100.0
-    perp = spot_to_perp(spot_symbol)
+    perp = spot_symbol  # Binance: spot and perp symbols are identical
     return OIDivergenceSignal(
         symbol=spot_symbol, perp_symbol=perp,
         oi_change_pct=oi_change, price_change_pct=price_change,
@@ -346,7 +352,7 @@ def compute_ls_ratio_backtest(
     percentile = (sum(1 for r in past if r <= current) / len(past)) * 100
     universe = list(all_ratios.values())
     cross = (sum(1 for r in universe if r <= current) / len(universe)) * 100 if universe else 100.0
-    perp = spot_to_perp(spot_symbol)
+    perp = spot_symbol  # Binance: spot and perp symbols are identical
     return LSRatioSignal(
         symbol=spot_symbol, perp_symbol=perp,
         current_ratio=current, percentile_90d=percentile,
@@ -358,6 +364,20 @@ def compute_ls_ratio_backtest(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _merge_histories(binance: list[dict], local: list[dict],
+                     key: str = "c") -> list[dict]:
+    """Merge Binance history with local snapshots, dedup by timestamp."""
+    if not local:
+        return binance
+    seen = {c["t"] for c in binance if c.get("t")}
+    for snap in local:
+        if snap.get("t") and snap["t"] not in seen:
+            binance.append(snap)
+            seen.add(snap["t"])
+    binance.sort(key=lambda c: c.get("t", 0))
+    return binance
+
+
 def _last_close(candles: list[dict]) -> Optional[float]:
     for c in reversed(candles):
         val = c.get("c")
@@ -473,16 +493,14 @@ def compute_taker_ratio_signal(
 ) -> Optional[TakerRatioSignal]:
     """Compute taker ratio extreme from pre-fetched history."""
     from src.config import TAKER_RATIO_HISTORY_MS, TAKER_RATIO_PERCENTILE
-    from src.binance import get_binance_symbol
 
-    bin_sym = get_binance_symbol(spot_symbol)
     dt = datetime.utcnow()
     current = taker_history.at(dt)
     if current is None:
         return None
     pct = taker_history.percentile(current, dt, TAKER_RATIO_HISTORY_MS)
     return TakerRatioSignal(
-        symbol=spot_symbol, binance_symbol=bin_sym,
+        symbol=spot_symbol, binance_symbol=spot_symbol,
         current_ratio=current, percentile_21d=pct or 100.0,
         cross_sectional_pct=0.0,
     )
@@ -504,31 +522,47 @@ def finalize_taker_signals(signals: list[TakerRatioSignal]) -> list[TakerRatioSi
 
 
 # ============================================================================
-# Signal 5: Order book imbalance (Binance spot)
+# Signal 5: Order book imbalance (Binance spot) — multi-snapshot persistence
 # ============================================================================
+ORDER_BOOK_SNAPSHOTS = 3
+ORDER_BOOK_SNAPSHOT_INTERVAL = 5  # seconds between snapshots
+
+
 @_dc
 class OrderBookSignal:
     symbol: str
     binance_symbol: str
-    bid_dominance: float   # 0-1, >0.5 = more bids
-    cross_sectional_pct: float
+    bid_dominance: float        # average across snapshots (for display)
+    bid_snapshots: list = _dc_field(default_factory=list)  # raw dominances for persistence
+    cross_sectional_pct: float = 0.0
     fired: bool = False
+    persistence_count: int = 0  # how many snapshots passed cross-sectional
 
 
 def compute_order_book_signal(spot_symbol: str) -> Optional[OrderBookSignal]:
-    """Fetch current order book depth and compute bid dominance."""
-    from src.binance import get_binance_symbol, get_order_book, compute_order_book_imbalance
+    """Fetch order book 3x at 5s intervals to catch spoofed walls."""
+    import time
+    from src.binance import get_order_book, compute_order_book_imbalance
     from src.config import ORDER_BOOK_LEVELS
 
-    bin_sym = get_binance_symbol(spot_symbol)
-    try:
-        depth = get_order_book(bin_sym, limit=100)
-    except Exception:
+    snapshots = []
+    for i in range(ORDER_BOOK_SNAPSHOTS):
+        try:
+            depth = get_order_book(spot_symbol, limit=100)
+            dom = compute_order_book_imbalance(depth, ORDER_BOOK_LEVELS)
+            snapshots.append(dom)
+        except Exception:
+            return None
+        if i < ORDER_BOOK_SNAPSHOTS - 1:
+            time.sleep(ORDER_BOOK_SNAPSHOT_INTERVAL)
+
+    if not snapshots:
         return None
-    dominance = compute_order_book_imbalance(depth, ORDER_BOOK_LEVELS)
     return OrderBookSignal(
-        symbol=spot_symbol, binance_symbol=bin_sym,
-        bid_dominance=dominance, cross_sectional_pct=0.0,
+        symbol=spot_symbol, binance_symbol=spot_symbol,
+        bid_dominance=sum(snapshots) / len(snapshots),
+        bid_snapshots=snapshots,
+        cross_sectional_pct=0.0,
     )
 
 
@@ -536,8 +570,43 @@ def finalize_order_book_signals(signals: list[OrderBookSignal]) -> list[OrderBoo
     from src.config import ORDER_BOOK_CROSS_SECTIONAL_PCT
     if not signals:
         return signals
-    doms = [s.bid_dominance for s in signals]
+
+    n_snapshots = ORDER_BOOK_SNAPSHOTS
+    majority_needed = n_snapshots // 2 + 1  # 2 of 3
+
+    # For each snapshot round, compute cross-sectional percentile and check fire
+    for round_idx in range(n_snapshots):
+        # Gather dominances for this round across all tokens
+        round_doms = []
+        for s in signals:
+            if len(s.bid_snapshots) > round_idx:
+                round_doms.append(s.bid_snapshots[round_idx])
+        if not round_doms:
+            continue
+
+        n = len(round_doms)
+        threshold_pct = 100 - ORDER_BOOK_CROSS_SECTIONAL_PCT
+        for s in signals:
+            if len(s.bid_snapshots) > round_idx:
+                dom = s.bid_snapshots[round_idx]
+                pct = (sum(1 for d in round_doms if d <= dom) / n) * 100
+                if pct >= threshold_pct:
+                    s.persistence_count += 1
+
+    # Fired if majority of snapshots passed cross-sectional check
+    # AND absolute bid dominance meets the minimum floor
+    from src.config import ORDER_BOOK_MIN_BID_DOM
     for s in signals:
-        s.cross_sectional_pct = (sum(1 for d in doms if d <= s.bid_dominance) / len(doms)) * 100
-        s.fired = s.cross_sectional_pct >= (100 - ORDER_BOOK_CROSS_SECTIONAL_PCT)
+        s.fired = (
+            s.persistence_count >= majority_needed
+            and s.bid_dominance >= ORDER_BOOK_MIN_BID_DOM
+        )
+
+    # Set cross_sectional_pct on the average for display
+    avg_doms = [s.bid_dominance for s in signals]
+    for s in signals:
+        s.cross_sectional_pct = (
+            sum(1 for d in avg_doms if d <= s.bid_dominance) / len(avg_doms)
+        ) * 100
+
     return signals

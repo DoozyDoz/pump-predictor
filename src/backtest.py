@@ -20,12 +20,11 @@ from src.config import (
     TAKER_RATIO_HISTORY_MS,
 )
 from src.db import db_session
-from src.coinalyze import (
-    get_ohlcv_history, get_funding_rate_history,
-    get_open_interest_history, get_long_short_ratio_history,
-    spot_to_perp,
+from src.binance import (
+    get_klines, get_funding_rate_history,
+    get_open_interest_history, get_global_ls_ratio_history,
 )
-from src.binance import TakerHistory, get_taker_ratio_history, get_binance_symbol
+from src.binance import TakerHistory, get_taker_ratio_history
 
 
 @dataclass
@@ -127,21 +126,19 @@ def run_backtest(spot_symbols: list[str], max_symbols: int = 0) -> list[Backtest
     end = datetime.utcnow()
     rq_start = end - timedelta(days=BACKTEST_YEARS * 365)
 
-    print(f"Fetching CoinAnalyze data for {len(spot_symbols)} symbols...")
+    print(f"Fetching Binance data for {len(spot_symbols)} symbols (limited to ~30d history)...")
     fund_h, oi_h, ls_h, ohlcv_h = {}, {}, {}, {}
     for sym in spot_symbols:
-        perp = spot_to_perp(sym)
-        fund_h[sym] = SortedHistory(_fetch(perp, rq_start, end, "funding"), "c")
-        oi_h[sym] = SortedHistory(_fetch(perp, rq_start, end, "oi"), "c")
-        ls_h[sym] = SortedHistory(_fetch(perp, rq_start, end, "ls"), "r")
-        ohlcv_h[sym] = _fetch(sym, rq_start, end, "ohlcv")
+        fund_h[sym] = SortedHistory(_fetch_bn(sym, "funding"), "c")
+        oi_h[sym] = SortedHistory(_fetch_bn(sym, "oi"), "c")
+        ls_h[sym] = SortedHistory(_fetch_bn(sym, "ls"), "r")
+        ohlcv_h[sym] = _fetch_bn(sym, "ohlcv")
 
     print(f"Fetching Binance taker ratio data...")
     taker_h = {}
     for sym in spot_symbols:
-        bin_sym = get_binance_symbol(sym)
         try:
-            candles = get_taker_ratio_history(bin_sym, period="1h", limit=500)
+            candles = get_taker_ratio_history(sym, period="1h", limit=500)
             taker_h[sym] = TakerHistory(candles) if candles else None
         except Exception:
             taker_h[sym] = None
@@ -156,7 +153,7 @@ def run_backtest(spot_symbols: list[str], max_symbols: int = 0) -> list[Backtest
                 ts = datetime.utcfromtimestamp(int(h.ts[0]))
                 if ts < actual_start:
                     actual_start = ts
-    actual_start += timedelta(days=90)
+    actual_start += timedelta(days=7)  # minimal warmup — Binance data is shallow
     if actual_start >= end:
         print("ERROR: Not enough data"); return []
 
@@ -333,13 +330,15 @@ def _oi_divergence_percentile(oi_hist: 'SortedHistory', price_func, dt: datetime
     return (sum(1 for d in past_divs if d <= current_div) / len(past_divs)) * 100
 
 
-def _fetch(sym, start, end, kind):
+def _fetch_bn(sym, kind):
+    """Fetch Binance data. History depth: funding=deep, OI=~30d, LS=~30d."""
     try:
-        if kind == "funding": return get_funding_rate_history(sym, from_dt=start, to_dt=end)
-        if kind == "oi": return get_open_interest_history(sym, from_dt=start, to_dt=end)
-        if kind == "ls": return get_long_short_ratio_history(sym, from_dt=start, to_dt=end, interval="4hour")
-        if kind == "ohlcv": return get_ohlcv_history(sym, from_dt=start, to_dt=end, interval="4hour")
-    except Exception: return []
+        if kind == "funding": return get_funding_rate_history(sym, limit=1000)
+        if kind == "oi": return get_open_interest_history(sym, period="4h", limit=500)
+        if kind == "ls": return get_global_ls_ratio_history(sym, period="4h", limit=500)
+        if kind == "ohlcv": return get_klines(sym, interval="4h", limit=1000, market="spot")
+    except Exception:
+        return []
     return []
 
 

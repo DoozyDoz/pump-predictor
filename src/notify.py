@@ -42,15 +42,22 @@ class TelegramNotifier:
         ]
 
         for a in alerts:
-            sym = a['symbol'].replace('USD.A', '')
+            sym = a['symbol'].replace('USDT', '')
             score = a['quant_score']
-            boost = a['qual_boost']
+            cat = a.get('catalyst_boost', '+0.00')
             final = a['final_score']
             signals = a.get('signals_fired', '')
             qual_tags = a.get('qual_tags', '')
+            override = a.get('override', '')
+            scan_status = a.get('scan_status', 'FULL')
 
-            lines.append(f"<b>━━ BUY ${sym} ━━</b>")
-            lines.append(f"Score: {score} quant + {boost} qual = <b>{final}</b>")
+            paper_tag = "<b>PAPER ONLY</b> — " if scan_status == "PARTIAL" else ""
+            lines.append(f"<b>━━ {paper_tag}BUY ${sym} ━━</b>")
+            lines.append(f"Score: {score} quant + {cat} catalyst = <b>{final}</b>")
+            if override:
+                lines.append(f"Override: <i>{override}</i>")
+            if scan_status == "PARTIAL":
+                lines.append("⚠️ <b>SCAN PARTIAL — do not execute live</b>")
 
             # Quantitative reasoning
             if signals:

@@ -6,15 +6,15 @@ Stacking weak signals before they become obvious. A quantitative + qualitative p
 
 | # | Signal | Source | Mechanism |
 |---|--------|--------|-----------|
-| 1 | Funding-rate extreme | CoinAnalyze | 90d percentile + cross-sectional bottom 5% |
-| 2 | OI/Price divergence | CoinAnalyze | 7d OI vs price divergence, top 5% |
-| 3 | Long/Short ratio extreme | CoinAnalyze | 90d percentile + cross-sectional bottom 5% |
-| 4 | Taker buy/sell ratio | Binance | 21d percentile + cross-sectional bottom 5% |
-| 5 | Order book imbalance | Binance | Top-10 bid dominance, cross-sectional top 5% |
+| 1 | Funding-rate extreme | Binance Futures | 90d percentile + cross-sectional bottom 5% |
+| 2 | OI/Price divergence | Binance Futures | 7d OI vs price divergence, top 5% (30d window) |
+| 3 | Long/Short ratio extreme | Binance Futures | 30d percentile + cross-sectional bottom 5% |
+| 4 | Taker buy/sell ratio | Binance Futures | 21d percentile + cross-sectional bottom 5% |
+| 5 | Order book imbalance | Binance Spot | Multi-snapshot top-10 bid dominance, min 0.60 floor |
 
-**Qualitative boost** stacks weak signals: volume anomalies, capitulation, momentum, trade count spikes, volatility. Two 0.5-confidence signals = one 1.0 signal.
+**Qualitative boost**: Real catalysts only (listings, governance, on-chain anomalies, TVL/revenue growth). 24h ticker tags (volume, momentum) are display-only — they do not contribute to scoring.
 
-**Alert threshold:** ≥2/5 signals or qualitative boost ≥ 0.8.
+**Alert rules:** ≥2/5 signals, at least one strong derivative signal (funding/OI/LS), or ≥1 + real catalyst boost ≥0.5. Taker + book alone is blocked. Alerts on partial scans are marked PAPER ONLY.
 
 ## Backtest Results (top 50 tokens by volume)
 
@@ -40,10 +40,9 @@ python3 -m src.main daily
 ## Environment Variables
 
 ```
-COINALYZE_API_KEY=   # free tier at coinalyze.net
-DUNE_API_KEY=        # optional — on-chain queries (free tier blocked)
 TELEGRAM_BOT_TOKEN=  # from @BotFather
 TELEGRAM_CHAT_ID=    # your Telegram user ID
+DUNE_API_KEY=        # optional — on-chain queries (free tier blocked)
 ```
 
 ## Commands
@@ -84,8 +83,7 @@ Paper trading companion. Tracks positions and alerts on TP/SL.
 pump-predictor/
 ├── src/
 │   ├── config.py           # All parameters and thresholds
-│   ├── coinalyze.py        # CoinAnalyze API client (12 endpoints)
-│   ├── binance.py          # Binance API client (taker ratio, order book, ticker)
+│   ├── binance.py          # Binance API client (spot, futures, derivatives — all signals)
 │   ├── signals.py          # 5 signal computations + backtest variants
 │   ├── backtest.py         # Walk-forward backtest with trade simulator
 │   ├── pipeline.py         # Daily batch orchestrator

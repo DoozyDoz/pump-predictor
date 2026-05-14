@@ -99,14 +99,17 @@ class QualitativeTag:
 class TokenQualitativeProfile:
     symbol: str
     tags: list[QualitativeTag] = field(default_factory=list)
-    qualitative_boost: float = 0.0  # -1.0 to +1.0 modifier on Pump Score
+    catalyst_boost: float = 0.0   # real catalysts only (governance, listing, on-chain, etc.)
+    blocked: bool = False
+    block_reason: str = ""
 
     def add_tag(self, tag: QualitativeTag):
         self.tags.append(tag)
-        # Stacking: sum of confidences, capped at 1.0.
-        # Two 0.5 signals = 1.0 (same as one 1.0 signal).
-        # This rewards multiple weak signals converging on the same token.
-        self.qualitative_boost = min(1.0, sum(t.confidence for t in self.tags))
+        # Only non-binance_24h sources contribute to catalyst_boost.
+        # 24h ticker tags (volume, momentum, trades) are display-only context.
+        if tag.source != "binance_24h":
+            self.catalyst_boost = min(1.0,
+                                      self.catalyst_boost + tag.confidence)
 
     def recent_tags(self, hours: int = 168) -> list[QualitativeTag]:
         cutoff = datetime.utcnow() - timedelta(hours=hours)
@@ -185,40 +188,30 @@ def check_github_activity(repo: str, since_days: int = 30) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def compute_qualitative_boost(profile: TokenQualitativeProfile) -> float:
+    """Recompute catalyst boost from stored tags (non-binance_24h sources only)."""
+    cat_boost = 0.0
+    for tag in profile.tags:
+        if tag.source != "binance_24h":
+            cat_boost = min(1.0, cat_boost + tag.confidence)
+    return cat_boost
+
+
+def qualitative_override(pump_score: int, catalyst_boost: float,
+                         threshold: int = 2) -> tuple[int, str]:
     """
-    Compute qualitative boost for a token.
-    Returns -1.0 to +1.0 to modify the Pump Score.
+    Apply qualitative catalyst boost to Pump Score.
 
-    High confidence signals (listing, on-chain, governance) provide strong boost.
-    Low confidence signals (social, sector) provide weak boost.
-    Multiple weak signals can stack to match one strong signal.
-    """
-    recent = profile.recent_tags(hours=168)  # last 7 days
-    if not recent:
-        return 0.0
-
-    # Weighted sum: high-confidence signals count more
-    weighted = sum(t.confidence * max(0, 1.0 - (t.lead_time_hours - 24) / 168)
-                   for t in recent if t.lead_time_hours > 0)
-
-    # Cap at 1.0
-    return min(1.0, max(-1.0, weighted))
-
-
-def qualitative_override(pump_score: int, boost: float, threshold: int = 2) -> tuple[int, str]:
-    """
-    Apply qualitative boost to Pump Score.
-
-    - If Pump Score ≥ threshold: qualitative may override a near-miss (score = threshold-1)
-    - If boost ≥ 0.8 (e.g., confirmed CEX listing): auto-alert even with score = 0
-    - If boost ≤ -0.5 (e.g., unlock dump incoming): suppress alert
+    catalyst_boost (real catalysts: listing, on-chain, governance, etc.):
+      - >= 0.8: auto-alert even with score = 0
+      - >= 0.5: push near-miss (score = threshold-1) over threshold
+      - <= -0.5: suppress an otherwise-qualifying alert
 
     Returns (adjusted_score, reason).
     """
-    if boost >= 0.8:
+    if catalyst_boost >= 0.8:
         return max(pump_score, threshold), "high-confidence catalyst overrides score"
-    if boost >= 0.5 and pump_score >= threshold - 1:
-        return pump_score + 1, "qualitative boost pushes near-miss over threshold"
-    if boost <= -0.5 and pump_score >= threshold:
+    if catalyst_boost >= 0.5 and pump_score >= threshold - 1:
+        return pump_score + 1, "catalyst boost pushes near-miss over threshold"
+    if catalyst_boost <= -0.5 and pump_score >= threshold:
         return threshold - 1, "negative catalyst suppresses alert"
     return pump_score, ""

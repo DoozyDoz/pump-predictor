@@ -3,12 +3,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-COINALYZE_API_KEY = os.getenv("COINALYZE_API_KEY")
 DUNE_API_KEY = os.getenv("DUNE_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-COINALYZE_BASE = "https://api.coinalyze.net/v1"
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "pump.db")
 
@@ -25,12 +22,12 @@ FUNDING_CROSS_SECTIONAL_PCT = 5.0
 FUNDING_HISTORY_DAYS = 90
 
 OI_DIVERGENCE_LOOKBACK_DAYS = 7
-OI_DIVERGENCE_HISTORY_DAYS = 90
+OI_DIVERGENCE_HISTORY_DAYS = 30  # Binance OI history: ~1 month
 OI_DIVERGENCE_PERCENTILE = 95  # top 5% of OI/price divergence
 OI_DIVERGENCE_CROSS_SECTIONAL_PCT = 5.0
 OI_PRICE_MAX_RISE_PCT = 5.0  # price must not have already pumped
 
-LS_RATIO_HISTORY_DAYS = 90
+LS_RATIO_HISTORY_DAYS = 30  # Binance LS ratio: ~30 days
 LS_RATIO_PERCENTILE = 2.0  # bottom 2% = extreme bearish sentiment
 LS_RATIO_CROSS_SECTIONAL_PCT = 5.0
 
@@ -40,6 +37,7 @@ TAKER_RATIO_CROSS_SECTIONAL_PCT = 5.0
 
 ORDER_BOOK_LEVELS = 10
 ORDER_BOOK_CROSS_SECTIONAL_PCT = 5.0  # top 5% bid dominance = bullish
+ORDER_BOOK_MIN_BID_DOM = 0.60   # absolute floor — bids must be 1.5x asks
 
 # Legacy — now using OI divergence + LS ratio instead of on-chain
 WALLET_GROWTH_PCT = 5.0
@@ -63,8 +61,6 @@ TRAILING_STOP_PCT = 0.03
 GO_PRECISION = 0.50
 GO_PROFIT_FACTOR = 1.5
 
-API_DELAY = 0.25  # seconds between API calls to avoid rate limits
-
 BACKTEST_YEARS = 2
-BACKTEST_TRAIN_MONTHS = 6
-BACKTEST_TEST_MONTHS = 1
+BACKTEST_TRAIN_MONTHS = 0   # no train window — fixed thresholds, no optimization
+BACKTEST_TEST_MONTHS = 1    # 1 month test fits Binance 30d OI/LS window

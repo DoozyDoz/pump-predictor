@@ -1,23 +1,24 @@
-"""Binance public API client — taker ratio, order book, ticker. No auth needed."""
+"""Binance public API client — spot, futures, derivatives. No auth needed."""
 
 import requests
 from typing import Optional
 from datetime import datetime
 from bisect import bisect_left
 import numpy as np
-from src.config import API_DELAY
 import time as _time
 
 BINANCE_FAPI = "https://fapi.binance.com"
 BINANCE_SPOT = "https://api.binance.com"
+BINANCE_FUTURES_DATA = "https://fapi.binance.com/futures/data"
 _last_call = 0.0
+_MIN_DELAY = 0.05  # 20 req/s — well within Binance limits
 
 
 def _rate_limit():
     global _last_call
     elapsed = _time.time() - _last_call
-    if elapsed < API_DELAY:
-        _time.sleep(API_DELAY - elapsed)
+    if elapsed < _MIN_DELAY:
+        _time.sleep(_MIN_DELAY - elapsed)
     _last_call = _time.time()
 
 
@@ -92,9 +93,175 @@ def compute_order_book_imbalance(depth: dict, levels: int = 10) -> float:
     return bid_vol / total if total > 0 else 0.5
 
 
-def get_binance_symbol(coin_spot_symbol: str) -> str:
-    """Convert CoinAnalyze spot symbol (PEPEUSD.A) to Binance symbol (PEPEUSDT)."""
-    return coin_spot_symbol.replace("USD.A", "USDT").replace(".A", "")
+def get_binance_symbol(symbol: str) -> str:
+    """Normalize to Binance USDT symbol. No-op for already-native symbols."""
+    return symbol.replace("USD.A", "USDT").replace(".A", "").replace("_PERP", "")
+
+
+# ---------------------------------------------------------------------------
+# Spot universe
+# ---------------------------------------------------------------------------
+
+def get_spot_usdt_symbols() -> list[str]:
+    """Return all USDT-quoted spot symbols from Binance exchangeInfo."""
+    data = _get(f"{BINANCE_SPOT}/api/v3/exchangeInfo")
+    symbols = []
+    for s in (data.get("symbols", []) if isinstance(data, dict) else []):
+        if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
+            symbols.append(s["symbol"])
+    return sorted(symbols)
+
+
+# ---------------------------------------------------------------------------
+# Funding rate (fapi)
+# ---------------------------------------------------------------------------
+
+def get_funding_rate(symbol: str) -> float | None:
+    """Current funding rate for a USDT-margined perpetual."""
+    data = _get(f"{BINANCE_FAPI}/fapi/v1/fundingRate", {
+        "symbol": symbol.upper(),
+        "limit": 1,
+    })
+    if isinstance(data, list) and data:
+        rate = data[0].get("fundingRate")
+        return float(rate) if rate else None
+    return None
+
+
+def get_funding_rate_history(symbol: str, limit: int = 500) -> list[dict]:
+    """
+    Paginated funding rate history — normalized to {t, c} format.
+    c = funding rate (float), t = funding time (unix seconds).
+    """
+    data = _get(f"{BINANCE_FAPI}/fapi/v1/fundingRate", {
+        "symbol": symbol.upper(),
+        "limit": min(limit, 1000),
+    })
+    if not isinstance(data, list):
+        return []
+    candles = []
+    for entry in data:
+        ts = entry.get("fundingTime")
+        rate = entry.get("fundingRate")
+        if ts and rate:
+            candles.append({"t": int(ts) // 1000, "c": float(rate)})
+    return candles
+
+
+def get_bulk_funding_rates(symbols: list[str]) -> dict[str, float]:
+    """Batch current funding rates using fapi/v1/premiumIndex (lighter than fundingRate)."""
+    result = {}
+    try:
+        data = _get(f"{BINANCE_FAPI}/fapi/v1/premiumIndex")
+        if isinstance(data, list):
+            sym_set = set(s.upper() for s in symbols)
+            for entry in data:
+                sym = entry.get("symbol", "")
+                if sym in sym_set:
+                    rate = entry.get("lastFundingRate")
+                    if rate:
+                        result[sym] = float(rate)
+    except Exception:
+        pass
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Open interest (fapi + futures/data)
+# ---------------------------------------------------------------------------
+
+def get_open_interest(symbol: str) -> float | None:
+    """Current futures open interest in USDT."""
+    data = _get(f"{BINANCE_FAPI}/fapi/v1/openInterest", {"symbol": symbol.upper()})
+    if isinstance(data, dict):
+        oi = data.get("openInterest")
+        return float(oi) if oi else None
+    return None
+
+
+def get_open_interest_history(symbol: str, period: str = "4h",
+                               limit: int = 500) -> list[dict]:
+    """
+    OI history — normalized to {t, c} format.
+    c = OI in USDT, t = timestamp (unix seconds). ~1 month of data.
+    """
+    data = _get(f"{BINANCE_FUTURES_DATA}/openInterestHist", {
+        "symbol": symbol.upper(),
+        "period": period,
+        "limit": min(limit, 500),
+    })
+    if not isinstance(data, list):
+        return []
+    candles = []
+    for entry in data:
+        ts = entry.get("timestamp")
+        oi = entry.get("sumOpenInterestValue") or entry.get("sumOpenInterest")
+        if ts and oi:
+            candles.append({"t": int(ts) // 1000, "c": float(oi)})
+    return candles
+
+
+# ---------------------------------------------------------------------------
+# Long/short ratio (futures/data)
+# ---------------------------------------------------------------------------
+
+def get_global_ls_ratio_history(symbol: str, period: str = "4h",
+                                 limit: int = 500) -> list[dict]:
+    """
+    Global long/short account ratio — normalized to {t, r} format.
+    r = longShortRatio, t = timestamp (unix seconds). ~30 days.
+    """
+    data = _get(f"{BINANCE_FUTURES_DATA}/globalLongShortAccountRatio", {
+        "symbol": symbol.upper(),
+        "period": period,
+        "limit": min(limit, 500),
+    })
+    if not isinstance(data, list):
+        return []
+    candles = []
+    for entry in data:
+        ts = entry.get("timestamp")
+        ratio = entry.get("longShortRatio")
+        if ts and ratio:
+            candles.append({"t": int(ts) // 1000, "r": float(ratio)})
+    return candles
+
+
+# ---------------------------------------------------------------------------
+# Klines / OHLCV (spot or futures)
+# ---------------------------------------------------------------------------
+
+def get_klines(symbol: str, interval: str = "4h", limit: int = 500,
+               market: str = "spot") -> list[dict]:
+    """
+    OHLCV klines from spot or futures.
+    Returns [{t, o, h, l, c, v, ...}, ...].
+    """
+    base = BINANCE_SPOT if market == "spot" else BINANCE_FAPI
+    endpoint = "/api/v3/klines" if market == "spot" else "/fapi/v1/klines"
+    raw = _get(f"{base}{endpoint}", {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "limit": min(limit, 1000),
+    })
+    if not isinstance(raw, list):
+        return []
+    # Binance klines are arrays; convert to dicts for compatibility
+    keys = ["t", "o", "h", "l", "c", "v", "T", "q", "n", "V", "Q", "B"]
+    candles = []
+    for row in raw:
+        candle = {}
+        for i, k in enumerate(keys):
+            if i < len(row):
+                val = row[i]
+                if k == "t" or k == "T":
+                    candle[k] = int(float(val)) // 1000  # Binance returns ms
+                elif k == "n":
+                    candle[k] = int(float(val))
+                else:
+                    candle[k] = float(val) if val else 0.0
+        candles.append(candle)
+    return candles
 
 
 class TakerHistory:

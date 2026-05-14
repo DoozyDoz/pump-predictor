@@ -12,7 +12,10 @@ from src.signals import (
     compute_taker_ratio_signal, finalize_taker_signals,
     compute_order_book_signal, finalize_order_book_signals,
 )
-from src.binance import TakerHistory, get_taker_ratio_history, get_binance_symbol, get_24h_tickers
+from src.binance import (
+    TakerHistory, get_taker_ratio_history, get_24h_tickers,
+    get_bulk_funding_rates,
+)
 from src.qualitative import (
     QualitativeTag, TokenQualitativeProfile,
     check_defillama_metrics, qualitative_override,
@@ -44,66 +47,114 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0):
     if symbols is None:
         symbols = refresh_universe()
     symbols = daily_volume_check(symbols)
-    sym_names = [s.replace("USD.A", "") for s in symbols]
+    sym_names = [s.replace("USDT", "") for s in symbols]
     print(f"Universe: {len(symbols)} tokens")
 
-    # ---- Fetch all free data sources ----
+    # ---- Tier 1: Critical (must succeed) ----
+    scan_status = "FULL"
+    scan_errors = []
+
     # Binance 24h tickers (single API call for all tokens)
     try:
         all_tickers = {t["symbol"]: t for t in get_24h_tickers()}
-    except Exception:
-        all_tickers = {}
+    except Exception as e:
+        print(f"SCAN FAILED: cannot fetch 24h tickers — {e}")
+        return []
 
-    # ---- Phase 1a: Cheap pre-filter — only current funding rates (fast) ----
-    from src.coinalyze import get_funding_rate, spot_to_perp
-    funding_present = []
-    for sym in symbols:
-        try:
-            rate = get_funding_rate(spot_to_perp(sym))
-            if rate is not None:
-                funding_present.append((sym, rate))
-        except Exception:
-            continue
-    # Tokens with negative funding (candidates worth deeper analysis)
+    # ---- Phase 1a: Pre-filter — batch funding rates (1 API call) ----
+    try:
+        all_funding_rates = get_bulk_funding_rates(symbols)
+    except Exception as e:
+        print(f"SCAN FAILED: cannot fetch funding rates — {e}")
+        return []
+    if not all_funding_rates:
+        print("SCAN FAILED: empty funding rate response")
+        return []
+
+    funding_present = [(s, all_funding_rates[s]) for s in symbols
+                       if s in all_funding_rates]
     neg_funding_syms = [s for s, r in funding_present if r < 0]
-    deep_check_syms = neg_funding_syms[:50]  # limit expensive checks
+    deep_check_syms = neg_funding_syms[:50]
     print(f"Pre-filter: {len(funding_present)} with funding, {len(neg_funding_syms)} negative, "
           f"deep-checking {len(deep_check_syms)}")
 
-    # ---- Quantitative signals (full computation on pre-filtered tokens) ----
-    # S1: Funding-rate extreme (all tokens deserve full percentile check)
-    funding_signals = compute_all_funding_signals(symbols)
+    # ---- Quantitative signals ----
+    # S1: Funding-rate extreme (all tokens)
+    try:
+        funding_signals = compute_all_funding_signals(symbols)
+    except Exception as e:
+        print(f"SCAN FAILED: funding signal computation failed — {e}")
+        return []
     n1 = sum(1 for s in funding_signals if s.fired)
 
-    # S2-S5: Only on tokens with negative funding (most likely to fire)
-    oi_signals, ls_signals, taker_signals, book_signals = [], [], [], []
+    # S2-S4: OI, LS, Taker on deep-check tokens (Tier 2 — degrade gracefully)
+    oi_signals, ls_signals, taker_signals = [], [], []
 
     for sym in deep_check_syms:
-        s = compute_oi_divergence_signal(sym)
-        if s is not None: oi_signals.append(s)
-        s = compute_ls_ratio_signal(sym)
-        if s is not None: ls_signals.append(s)
-        bin_sym = get_binance_symbol(sym)
         try:
-            candles = get_taker_ratio_history(bin_sym, period="1h", limit=500)
+            s = compute_oi_divergence_signal(sym)
+            if s is not None: oi_signals.append(s)
+        except Exception:
+            pass
+        try:
+            s = compute_ls_ratio_signal(sym)
+            if s is not None: ls_signals.append(s)
+        except Exception:
+            pass
+        try:
+            candles = get_taker_ratio_history(sym, period="1h", limit=500)
             if candles:
                 hist = TakerHistory(candles)
                 s = compute_taker_ratio_signal(sym, hist)
                 if s is not None: taker_signals.append(s)
-        except Exception: continue
-        s = compute_order_book_signal(sym)
-        if s is not None: book_signals.append(s)
+        except Exception:
+            pass
 
     oi_signals = finalize_oi_divergence_signals(oi_signals)
     ls_signals = finalize_ls_ratio_signals(ls_signals)
     taker_signals = finalize_taker_signals(taker_signals)
-    book_signals = finalize_order_book_signals(book_signals)
     n2 = sum(1 for s in oi_signals if s.fired)
     n3 = sum(1 for s in ls_signals if s.fired)
     n4 = sum(1 for s in taker_signals if s.fired)
+
+    if len(oi_signals) == 0:
+        scan_errors.append("OI")
+        scan_status = "PARTIAL"
+    if len(ls_signals) == 0:
+        scan_errors.append("LS")
+        scan_status = "PARTIAL"
+
+    # S5: Order book — only on tokens with ≥1 other signal firing
+    book_signals = []
+    fired_set = set()
+    for sig_list in [oi_signals, ls_signals, taker_signals]:
+        for s in sig_list:
+            if s.fired:
+                fired_set.add(s.symbol)
+    for s in funding_signals:
+        if s.fired:
+            fired_set.add(s.symbol)
+
+    book_candidates = [s for s in deep_check_syms if s in fired_set]
+    if book_candidates:
+        print(f"Order book: gated to {len(book_candidates)} tokens (≥1 other signal)")
+        for sym in book_candidates:
+            try:
+                s = compute_order_book_signal(sym)
+                if s is not None: book_signals.append(s)
+            except Exception:
+                pass
+        book_signals = finalize_order_book_signals(book_signals)
     n5 = sum(1 for s in book_signals if s.fired)
 
-    print(f"Fires — Fund:{n1} OI:{n2} LS:{n3} Taker:{n4} Book:{n5}")
+    status_line = f"Fires — Fund:{n1} OI:{n2} LS:{n3} Taker:{n4} Book:{n5}"
+    if scan_status == "PARTIAL":
+        status_line += f" | SCAN PARTIAL (missing: {', '.join(scan_errors)})"
+    print(status_line)
+
+    # ---- Store signal snapshots for local history ----
+    _store_snapshots(symbols, all_funding_rates, oi_signals, ls_signals,
+                     taker_signals, run_ts)
 
     # ---- Qualitative signals ----
     qualitative_profiles = _build_qualitative(symbols, sym_names, all_tickers, mapping)
@@ -111,7 +162,7 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0):
     # ---- Build alerts ----
     alerts = _build_alerts(
         funding_signals, oi_signals, ls_signals, taker_signals, book_signals,
-        qualitative_profiles, run_ts, portfolio_usd,
+        qualitative_profiles, run_ts, portfolio_usd, scan_status,
     )
 
     if alerts:
@@ -119,6 +170,7 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0):
         _print_terminal(alerts, portfolio_usd)
         _send_telegram(alerts, portfolio_usd)
     else:
+        _write_empty_csv(run_ts)
         print("No pump alerts today.")
         _send_telegram([], portfolio_usd)  # optionally silence no-alert days
     return alerts
@@ -131,10 +183,9 @@ def _build_qualitative(symbols, sym_names, all_tickers, mapping):
     for i, sym in enumerate(symbols):
         name = sym_names[i]
         profile = TokenQualitativeProfile(symbol=sym)
-        bin_sym = get_binance_symbol(sym)
 
         # 1. Volume + Price anomaly (Binance 24h ticker — all tokens)
-        ticker = all_tickers.get(bin_sym.upper())
+        ticker = all_tickers.get(sym.upper())
         if ticker:
             try:
                 vol = float(ticker.get("quoteVolume", 0) or 0)  # USDT volume
@@ -180,19 +231,13 @@ def _build_qualitative(symbols, sym_names, all_tickers, mapping):
                         lead_time_hours=12,
                     ))
 
-                # Daily range compression → expansion signal (coiling)
+                # Daily range — now a filter, not a boost.
+                # Wide range = high noise, tight stop won't survive.
                 if last > 0 and high > low:
                     daily_range = (high - low) / last * 100
-                    if daily_range > 15:
-                        profile.add_tag(QualitativeTag(
-                            token_symbol=sym,
-                            catalyst_type="high_volatility",
-                            description=f"Daily range {daily_range:.1f}% — breakout/breakdown active",
-                            source="binance_24h",
-                            confidence=0.2,
-                            detected_at=datetime.utcnow().isoformat(),
-                            lead_time_hours=6,
-                        ))
+                    if daily_range > 25:
+                        profile.blocked = True
+                        profile.block_reason = f"daily range {daily_range:.1f}% > 25% — stop too tight for this vol"
             except (ValueError, TypeError):
                 pass
 
@@ -240,18 +285,35 @@ def _build_qualitative(symbols, sym_names, all_tickers, mapping):
             except (ValueError, TypeError):
                 pass
 
+        # 4. 24h price filter — block chasing if no real catalyst
+        #    (runs AFTER all tags built so catalyst_boost is fully computed)
+        if ticker:
+            try:
+                pct_24h = float(ticker.get("priceChangePercent", 0) or 0)
+                if not profile.blocked and pct_24h > 20 and profile.catalyst_boost < 0.5:
+                    profile.blocked = True
+                    profile.block_reason = (
+                        f"24h price +{pct_24h:.1f}% with no catalyst ({profile.catalyst_boost:.2f}) — "
+                        f"already pumped, not a pre-pump setup"
+                    )
+            except (ValueError, TypeError):
+                pass
+
         profiles[sym] = profile
 
     # Count qualitative signals found
     total_tags = sum(len(p.tags) for p in profiles.values())
-    boosted = sum(1 for p in profiles.values() if p.qualitative_boost >= 0.5)
+    cat_boosted = sum(1 for p in profiles.values() if p.catalyst_boost >= 0.5)
+    blocked = sum(1 for p in profiles.values() if p.blocked)
     if total_tags > 0:
-        print(f"Qualitative: {total_tags} tags across {boosted} tokens (boost ≥ 0.5)")
+        print(f"Qualitative: {total_tags} tags, {cat_boosted} catalyst-boosted, "
+              f"{blocked} blocked by filters")
 
     return profiles
 
 
-def _build_alerts(fund, oi, ls, taker, book, qual_profiles, run_ts, portfolio_usd=1000.0):
+def _build_alerts(fund, oi, ls, taker, book, qual_profiles, run_ts, portfolio_usd=1000.0,
+                  scan_status: str = "FULL"):
     alerts = []
     pos_size = portfolio_usd * POSITION_SIZE_PCT
     f_map = {s.symbol: s for s in fund}
@@ -292,12 +354,27 @@ def _build_alerts(fund, oi, ls, taker, book, qual_profiles, run_ts, portfolio_us
             score += 1; fired.append("book_imbalance")
             details.update({"bid_dom": f"{b_s.bid_dominance:.3f}"})
 
-        # Qualitative boost
+        # Qualitative boost (catalyst only; ticker tags are display-only)
         profile = qual_profiles.get(sym)
-        boost = profile.qualitative_boost if profile else 0.0
-        adjusted_score, override_reason = qualitative_override(score, boost, ALERT_THRESHOLD)
+        if profile and profile.blocked:
+            continue  # filtered out by daily range or 24h price check
+        cat_boost = profile.catalyst_boost if profile else 0.0
+        adjusted_score, override_reason = qualitative_override(
+            score, cat_boost, ALERT_THRESHOLD,
+        )
 
         if adjusted_score < ALERT_THRESHOLD:
+            continue
+
+        # Minimum quant signal rule: need ≥2 quant signals, or ≥1 + real catalyst
+        catalyst_present = cat_boost >= 0.5
+        if score < 2 and not (score >= 1 and catalyst_present):
+            continue
+
+        # Require at least one strong derivative signal: funding, OI, or LS.
+        # Taker + book alone is too fragile for live entries.
+        STRONG_SIGNALS = {"funding_extreme", "oi_divergence", "ls_extreme"}
+        if not (set(fired) & STRONG_SIGNALS):
             continue
 
         # Collect qualitative tags
@@ -309,11 +386,12 @@ def _build_alerts(fund, oi, ls, taker, book, qual_profiles, run_ts, portfolio_us
         alerts.append({
             "symbol": sym,
             "quant_score": f"{score}/5",
-            "qual_boost": f"{boost:+.2f}",
+            "catalyst_boost": f"{cat_boost:+.2f}",
             "final_score": f"{adjusted_score}/5",
             "signals_fired": "|".join(fired),
             "qual_tags": " | ".join(qual_tags) if qual_tags else "",
             "override": override_reason,
+            "scan_status": scan_status,
             "position_size_usd": f"{pos_size:.2f}",
             "alert_ts": run_ts,
             **details,
@@ -341,9 +419,9 @@ def _send_telegram(alerts, portfolio_usd):
 
 def _persist_alert(sym, score, fired, run_ts):
     with db_session() as conn:
-        conn.execute("INSERT OR IGNORE INTO tokens (symbol, exchange, market) VALUES (?, 'A', 'spot')", (sym,))
+        conn.execute("INSERT OR IGNORE INTO tokens (symbol, exchange, market) VALUES (?, 'B', 'spot')", (sym,))
         row = conn.execute(
-            "SELECT id FROM tokens WHERE symbol = ? AND exchange = 'A' AND market = 'spot'", (sym,)
+            "SELECT id FROM tokens WHERE symbol = ? AND exchange = 'B' AND market = 'spot'", (sym,)
         ).fetchone()
         if row:
             conn.execute(
@@ -352,13 +430,66 @@ def _persist_alert(sym, score, fired, run_ts):
             )
 
 
+CSV_FIELDNAMES = [
+    "symbol", "quant_score", "catalyst_boost", "final_score",
+    "signals_fired", "qual_tags", "override", "scan_status", "position_size_usd",
+    "alert_ts", "fund_rate", "fund_pct", "oi_div", "ls_ratio", "taker_ratio", "bid_dom",
+]
+
+
 def _write_csv(alerts, path="pump_alerts.csv"):
     if not alerts: return
     with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=alerts[0].keys())
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES, extrasaction='ignore')
         writer.writeheader()
         writer.writerows(alerts)
     print(f"Alerts → {path}")
+
+
+def _store_snapshots(symbols, funding_rates, oi_signals, ls_signals,
+                     taker_signals, run_ts):
+    """Store today's signal values to build local percentile history."""
+    from src.snapshots import store_snapshots
+    from src.binance import get_open_interest
+    today = run_ts[:10]  # YYYY-MM-DD
+
+    snapshots = []
+    for sym in symbols:
+        # Funding rate
+        rate = funding_rates.get(sym)
+        if rate is not None:
+            snapshots.append({"symbol": sym, "signal_type": "funding_rate",
+                              "value": rate, "snapshot_ts": today})
+
+    # OI — fetch current raw open interest from Binance (OI signals store divergence)
+    oi_symbols = {s.symbol for s in oi_signals}
+    for sym in oi_symbols:
+        try:
+            oi = get_open_interest(sym)
+            if oi is not None:
+                snapshots.append({"symbol": sym, "signal_type": "oi_value",
+                                  "value": oi, "snapshot_ts": today})
+        except Exception:
+            pass
+
+    # LS ratio values
+    for s in ls_signals:
+        snapshots.append({"symbol": s.symbol, "signal_type": "ls_ratio",
+                          "value": s.current_ratio, "snapshot_ts": today})
+
+    # Taker ratio values
+    for s in taker_signals:
+        snapshots.append({"symbol": s.symbol, "signal_type": "taker_ratio",
+                          "value": s.current_ratio, "snapshot_ts": today})
+
+    if snapshots:
+        store_snapshots(snapshots)
+
+
+def _write_empty_csv(run_ts, path="pump_alerts.csv"):
+    with open(path, "w", newline="") as f:
+        f.write(f"# No alerts — {run_ts}\n")
+    print(f"Empty alerts → {path}")
 
 
 def _print_terminal(alerts, portfolio_usd):
@@ -370,19 +501,23 @@ def _print_terminal(alerts, portfolio_usd):
     print("╚" + "═" * 70 + "╝")
 
     for a in alerts:
-        sym = a['symbol'].replace('USD.A', '')
+        sym = a['symbol'].replace('USDT', '')
         score = a['quant_score']
-        boost = a['qual_boost']
+        cat = a.get('catalyst_boost', '+0.00')
         final = a['final_score']
         signals = a.get('signals_fired', '')
         qual_tags = a.get('qual_tags', '')
         override = a.get('override', '')
+        scan_status = a.get('scan_status', 'FULL')
 
         # Header
+        paper_tag = "PAPER ONLY — " if scan_status == "PARTIAL" else ""
         print(f"\n  {'█'*60}")
-        print(f"  █  BUY ${sym}")
+        print(f"  █  {paper_tag}BUY ${sym}")
         print(f"  █  Position: ${pos_size:.0f} | Stop: -7% | TP: +15%/+25%/trail")
-        print(f"  █  Score: {score} quant + {boost} qual = {final} (≥{ALERT_THRESHOLD} triggers alert)")
+        print(f"  █  Score: {score} quant + {cat} catalyst = {final} (≥{ALERT_THRESHOLD} triggers)")
+        if scan_status == "PARTIAL":
+            print(f"  █  ⚠️  SCAN PARTIAL — do not execute live")
         print(f"  {'█'*60}")
 
         # Quantitative reasoning

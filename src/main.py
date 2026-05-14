@@ -27,7 +27,8 @@ def cmd_backtest(args):
     from src.db import db_session
     with db_session() as conn:
         rows = conn.execute(
-            "SELECT symbol FROM tokens WHERE in_universe = TRUE AND market = 'spot' ORDER BY id"
+            "SELECT symbol FROM tokens WHERE in_universe = TRUE AND market = 'spot' "
+            "AND exchange = 'B' ORDER BY id"
         ).fetchall()
     symbols = [r[0] for r in rows] if rows else refresh_universe()
     if args.limit:

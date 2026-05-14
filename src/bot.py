@@ -59,8 +59,8 @@ def open_position(symbol: str, entry_price: float, chat_id: str, size_usd: float
     now = datetime.utcnow().isoformat()
 
     with db_session() as conn:
-        conn.execute("INSERT OR IGNORE INTO tokens (symbol, exchange, market) VALUES (?, 'A', 'spot')", (symbol,))
-        row = conn.execute("SELECT id FROM tokens WHERE symbol = ? AND exchange = 'A'", (symbol,)).fetchone()
+        conn.execute("INSERT OR IGNORE INTO tokens (symbol, exchange, market) VALUES (?, 'B', 'spot')", (symbol,))
+        row = conn.execute("SELECT id FROM tokens WHERE symbol = ? AND exchange = 'B'", (symbol,)).fetchone()
         tid = row[0] if row else None
 
         cur = conn.execute("""
@@ -108,16 +108,10 @@ def get_active_positions(chat_id: str) -> list[dict]:
 
 
 def get_price(symbol: str) -> float | None:
-    """Get current price from Binance."""
+    """Get current price from Binance. Accepts base (COS) or full symbol (COSUSDT)."""
+    sym = symbol if symbol.upper().endswith("USDT") else f"{symbol}USDT"
     try:
-        resp = requests.get(f"{BINANCE_TICKER}?symbol={symbol}USDT", timeout=10)
-        if resp.status_code == 200:
-            return float(resp.json()["price"])
-    except Exception:
-        pass
-    # Try CoinAnalyze fallback — just use Binance symbol
-    try:
-        resp = requests.get(f"{BINANCE_TICKER}?symbol={symbol}", timeout=10)
+        resp = requests.get(f"{BINANCE_TICKER}?symbol={sym.upper()}", timeout=10)
         if resp.status_code == 200:
             return float(resp.json()["price"])
     except Exception:
@@ -138,7 +132,7 @@ def check_positions(chat_id: str):
     alerts = []
 
     for p in positions:
-        sym = p["symbol"].replace("USD.A", "")
+        sym = p["symbol"].replace("USDT", "")
         price = get_price(sym)
         if price is None:
             continue
@@ -210,7 +204,7 @@ def handle_message(msg: dict):
             sym = parts[1].upper().replace("$", "")
             # Find active position
             positions = get_active_positions(chat_id)
-            match = [p for p in positions if p["symbol"].replace("USD.A", "").upper() == sym]
+            match = [p for p in positions if p["symbol"].replace("USDT", "").upper() == sym]
             if match:
                 price = get_price(sym)
                 if price:
@@ -235,7 +229,7 @@ def handle_message(msg: dict):
             return
         lines = ["<b>📊 ACTIVE POSITIONS</b>\n"]
         for p in positions:
-            sym = p["symbol"].replace("USD.A", "")
+            sym = p["symbol"].replace("USDT", "")
             price = get_price(sym)
             if price:
                 pnl = ((price - p["entry_price"]) / p["entry_price"]) * 100
@@ -293,7 +287,7 @@ def handle_message(msg: dict):
 
             if price and price > 0:
                 size = 100.0  # default $100 test position
-                tid = open_position(f"{sym}USD.A", price, chat_id, size)
+                tid = open_position(f"{sym}USDT", price, chat_id, size)
                 if tid:
                     tp1 = price * (1 + TAKE_PROFIT_1_PCT)
                     tp2 = price * (1 + TAKE_PROFIT_2_PCT)
@@ -316,7 +310,7 @@ def handle_message(msg: dict):
             price = float(parts[1].replace("$", "").replace(",", ""))
             if price > 0:
                 size = 100.0
-                tid = open_position(f"{sym}USD.A", price, chat_id, size)
+                tid = open_position(f"{sym}USDT", price, chat_id, size)
                 if tid:
                     tp1 = price * (1 + TAKE_PROFIT_1_PCT)
                     stop = price * (1 + STOP_LOSS_PCT)
