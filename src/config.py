@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY")
 DUNE_API_KEY = os.getenv("DUNE_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
