@@ -41,6 +41,7 @@ def cmd_backtest(args):
 
 def cmd_import_coinglass(args):
     """Import historical derivatives data from CoinGlass into signal_snapshots."""
+    init_db()  # ensure signal_snapshots table exists
     from src.db import db_session
     from src.snapshots import store_snapshots
     from src.coinglass import (
