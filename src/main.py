@@ -71,7 +71,7 @@ def cmd_import_coinglass(args):
             # Funding rate history
             data = get_funding_history(sym, months=months, interval=interval)
             for c in data:
-                ts = datetime.fromtimestamp(c["t"], datetime.UTC).strftime("%Y-%m-%d")
+                ts = datetime.utcfromtimestamp(c["t"]).strftime("%Y-%m-%d")
                 snapshots.append({"symbol": sym, "signal_type": "funding_rate",
                                   "value": c["c"], "snapshot_ts": ts})
                 added += 1
@@ -82,7 +82,7 @@ def cmd_import_coinglass(args):
             # Open interest history
             data = get_open_interest_history(sym, months=months, interval=interval)
             for c in data:
-                ts = datetime.fromtimestamp(c["t"], datetime.UTC).strftime("%Y-%m-%d")
+                ts = datetime.utcfromtimestamp(c["t"]).strftime("%Y-%m-%d")
                 snapshots.append({"symbol": sym, "signal_type": "oi_value",
                                   "value": c["c"], "snapshot_ts": ts})
                 added += 1
@@ -93,7 +93,7 @@ def cmd_import_coinglass(args):
             # LS ratio history
             data = get_ls_ratio_history(sym, months=months, interval=interval)
             for c in data:
-                ts = datetime.fromtimestamp(c["t"], datetime.UTC).strftime("%Y-%m-%d")
+                ts = datetime.utcfromtimestamp(c["t"]).strftime("%Y-%m-%d")
                 snapshots.append({"symbol": sym, "signal_type": "ls_ratio",
                                   "value": c["r"], "snapshot_ts": ts})
                 added += 1
