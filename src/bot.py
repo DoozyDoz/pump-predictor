@@ -266,6 +266,20 @@ def handle_message(msg: dict):
         send_message(chat_id, "\n".join(lines))
         return
 
+    # "scan" / "/scan" — on-demand pipeline run
+    if lower in ("scan", "/scan"):
+        send_message(chat_id, "<b>🔍 Running scan...</b>")
+        try:
+            from src.pipeline import run_daily
+            alerts = run_daily()
+            if alerts:
+                send_message(chat_id, f"<b>✅ Scan complete</b> — {len(alerts)} alert(s) sent above")
+            else:
+                send_message(chat_id, "<b>✅ Scan complete</b> — no alerts today")
+        except Exception as e:
+            send_message(chat_id, f"<b>❌ Scan failed:</b> {str(e)[:200]}")
+        return
+
     # "help" / "/help" / "start"
     if lower in ("help", "/help", "start", "/start", "hi", "hello"):
         send_message(chat_id,
@@ -273,6 +287,7 @@ def handle_message(msg: dict):
             "<b>Commands:</b>\n"
             "• <code>buy SYMBOL at PRICE</code> — track a paper position\n"
             "• <code>close SYMBOL</code> — close a tracked position\n"
+            "• <code>scan</code> — run on-demand pump scan\n"
             "• <code>positions</code> — show all active positions\n"
             "• <code>help</code> — this message\n\n"
             "<b>Auto-alerts:</b>\n"
