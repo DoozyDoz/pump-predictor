@@ -126,12 +126,20 @@ def run_backtest(spot_symbols: list[str], max_symbols: int = 0) -> list[Backtest
     end = datetime.utcnow()
     rq_start = end - timedelta(days=BACKTEST_YEARS * 365)
 
-    print(f"Fetching Binance data for {len(spot_symbols)} symbols (limited to ~30d history)...")
+    print(f"Fetching Binance data for {len(spot_symbols)} symbols...")
+    from src.snapshots import get_snapshot_history
     fund_h, oi_h, ls_h, ohlcv_h = {}, {}, {}, {}
     for sym in spot_symbols:
-        fund_h[sym] = SortedHistory(_fetch_bn(sym, "funding"), "c")
-        oi_h[sym] = SortedHistory(_fetch_bn(sym, "oi"), "c")
-        ls_h[sym] = SortedHistory(_fetch_bn(sym, "ls"), "r")
+        # Merge Binance history with local CoinGlass snapshots
+        fund_candles = _merge_backtest(_fetch_bn(sym, "funding"),
+                                       get_snapshot_history(sym, "funding_rate", 365), "c")
+        oi_candles = _merge_backtest(_fetch_bn(sym, "oi"),
+                                     get_snapshot_history(sym, "oi_value", 365), "c")
+        ls_candles = _merge_backtest(_fetch_bn(sym, "ls"),
+                                     get_snapshot_history(sym, "ls_ratio", 365), "r")
+        fund_h[sym] = SortedHistory(fund_candles, "c")
+        oi_h[sym] = SortedHistory(oi_candles, "c")
+        ls_h[sym] = SortedHistory(ls_candles, "r")
         ohlcv_h[sym] = _fetch_bn(sym, "ohlcv")
 
     print(f"Fetching Binance taker ratio data...")
@@ -340,6 +348,20 @@ def _fetch_bn(sym, kind):
     except Exception:
         return []
     return []
+
+
+def _merge_backtest(binance: list[dict], local: list[dict], key: str) -> list[dict]:
+    """Merge Binance history with local snapshots, dedup by timestamp."""
+    if not local:
+        return binance
+    result = list(binance)
+    seen = {c["t"] for c in result if c.get("t")}
+    for snap in local:
+        if snap.get("t") and snap["t"] not in seen and snap.get(key) is not None:
+            result.append(snap)
+            seen.add(snap["t"])
+    result.sort(key=lambda c: c.get("t", 0))
+    return result
 
 
 def _gen_windows(start, end):
