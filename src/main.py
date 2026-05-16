@@ -3,8 +3,8 @@
 import argparse
 from datetime import datetime
 from src.db import init_db
-from src.pipeline import run_daily
-from src.backtest import run_backtest, print_summary
+from src.pipeline import run_daily, run_phase2_confirmation
+from src.backtest import run_backtest, print_summary, run_staged_backtest
 from src.universe import refresh_universe
 
 
@@ -21,7 +21,17 @@ def cmd_universe(_args):
 
 
 def cmd_daily(args):
-    run_daily(portfolio_usd=args.portfolio)
+    if args.staged:
+        from src.pipeline import run_phase1_watchlist
+        run_phase1_watchlist(portfolio_usd=args.portfolio)
+    elif args.legacy:
+        run_daily(portfolio_usd=args.portfolio, legacy=True)
+    else:
+        run_daily(portfolio_usd=args.portfolio)
+
+
+def cmd_confirm(_args):
+    run_phase2_confirmation()
 
 
 def cmd_backtest(args):
@@ -34,8 +44,12 @@ def cmd_backtest(args):
     symbols = [r[0] for r in rows] if rows else refresh_universe()
     if args.limit:
         symbols = symbols[:args.limit]
-    print(f"Running backtest on {len(symbols)} symbols...")
-    results = run_backtest(symbols)
+    if args.staged:
+        print(f"Running staged backtest on {len(symbols)} symbols...")
+        results = run_staged_backtest(symbols)
+    else:
+        print(f"Running backtest on {len(symbols)} symbols...")
+        results = run_backtest(symbols)
     print_summary(results)
 
 
@@ -124,9 +138,14 @@ def main():
 
     p = sub.add_parser("daily", help="Run daily batch pipeline")
     p.add_argument("--portfolio", type=float, default=1000.0, help="Portfolio size in USD")
+    p.add_argument("--staged", action="store_true", help="Run staged workflow (Phase 1 only)")
+    p.add_argument("--legacy", action="store_true", help="Use legacy immediate-alert mode")
+
+    p = sub.add_parser("confirm", help="Run confirmation phase on watchlist candidates")
 
     p = sub.add_parser("backtest", help="Run funding-rate backtest")
     p.add_argument("--limit", type=int, default=0, help="Limit to N tokens (faster test)")
+    p.add_argument("--staged", action="store_true", help="Run staged backtest instead of immediate-alert")
 
     p = sub.add_parser("import-coinglass", help="Import CoinGlass history into signal_snapshots")
     p.add_argument("--limit", type=int, default=0, help="Limit to N tokens")
@@ -141,6 +160,8 @@ def main():
         cmd_universe(args)
     elif args.command == "daily":
         cmd_daily(args)
+    elif args.command == "confirm":
+        cmd_confirm(args)
     elif args.command == "backtest":
         cmd_backtest(args)
     elif args.command == "import-coinglass":

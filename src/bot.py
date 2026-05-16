@@ -12,6 +12,7 @@ from src.config import (
     STOP_LOSS_PCT, TAKE_PROFIT_1_PCT, TAKE_PROFIT_2_PCT,
     TAKE_PROFIT_1_PCT_SHARE, TAKE_PROFIT_2_PCT_SHARE,
     TRAILING_STOP_PCT, POSITION_SIZE_PCT,
+    CONFIRMATION_POLL_MINUTES, LEGACY_IMMEDIATE_ALERTS,
 )
 from src.db import db_session, init_db
 
@@ -26,6 +27,7 @@ TP_CHECK_INTERVAL = 1800  # check TP/SL every 30 minutes (seconds)
 MENU_BUTTONS = {
     "🔍 Scan": "scan",
     "📊 Positions": "positions",
+    "👁 Watchlist": "watchlist",
     "❓ Help": "help",
 }
 
@@ -35,7 +37,7 @@ def build_main_menu() -> dict:
     return {
         "keyboard": [
             ["🔍 Scan", "📊 Positions"],
-            ["❓ Help"],
+            ["👁 Watchlist", "❓ Help"],
         ],
         "resize_keyboard": True,
         "persistent": True,
@@ -301,14 +303,50 @@ def handle_message(msg: dict):
     if lower in ("scan", "/scan"):
         send_message(chat_id, "<b>🔍 Running scan...</b>")
         try:
-            from src.pipeline import run_daily
-            alerts = run_daily()
-            if alerts:
-                send_message(chat_id, f"<b>✅ Scan complete</b> — {len(alerts)} alert(s) sent above")
+            if LEGACY_IMMEDIATE_ALERTS:
+                from src.pipeline import run_daily
+                alerts = run_daily()
+                if alerts:
+                    send_message(chat_id, f"<b>✅ Scan complete</b> — {len(alerts)} alert(s) sent above")
+                else:
+                    send_message(chat_id, "<b>✅ Scan complete</b> — no alerts today")
             else:
-                send_message(chat_id, "<b>✅ Scan complete</b> — no alerts today")
+                from src.pipeline import run_phase1_watchlist, run_phase2_confirmation
+                candidates = run_phase1_watchlist()
+                if candidates:
+                    send_message(chat_id, f"<b>✅ Phase 1 complete</b> — {len(candidates)} watchlist candidate(s)")
+                results = run_phase2_confirmation()
+                if results:
+                    confirmed = [r for r in results if r.get("confirmed")]
+                    denied = [r for r in results if r.get("denied")]
+                    msg_parts = []
+                    if confirmed:
+                        msg_parts.append(f"{len(confirmed)} confirmed")
+                    if denied:
+                        msg_parts.append(f"{len(denied)} expired")
+                    if msg_parts:
+                        send_message(chat_id, f"<b>✅ Confirmation check</b> — {', '.join(msg_parts)}")
+                send_message(chat_id, "<b>✅ Scan complete</b>")
         except Exception as e:
             send_message(chat_id, f"<b>❌ Scan failed:</b> {str(e)[:200]}")
+        return
+
+    # "watchlist" / "/watchlist" — show current watchlist candidates
+    if lower in ("watchlist", "/watchlist"):
+        try:
+            from src.stages import StageManager
+            mgr = StageManager()
+            candidates = mgr.get_watchlist_candidates()
+            if not candidates:
+                send_message(chat_id, "<b>Watchlist</b> — No active candidates.")
+                return
+            lines = [f"<b>Watchlist ({len(candidates)} candidates)</b>\n"]
+            for c in candidates:
+                sym = c["symbol"].replace("USDT", "")
+                lines.append(f"• {sym} — score: {c['score']}")
+            send_message(chat_id, "\n".join(lines[:20]))
+        except Exception as e:
+            send_message(chat_id, f"<b>❌ Watchlist error:</b> {str(e)[:200]}")
         return
 
     # "menu" / "/menu" — re-show the keyboard
@@ -326,6 +364,7 @@ def handle_message(msg: dict):
             "• <code>buy SYMBOL at PRICE</code> — track a paper position\n"
             "• <code>close SYMBOL</code> — close a tracked position\n"
             "• <code>scan</code> — run on-demand pump scan\n"
+            "• <code>watchlist</code> — show current watchlist candidates\n"
             "• <code>positions</code> — show all active positions\n"
             "• <code>menu</code> — show command buttons\n"
             "• <code>help</code> — this message\n\n"
@@ -410,6 +449,7 @@ def run_bot():
     offset = 0
     last_price_check = time.time()
     last_tp_check = time.time()
+    last_confirmation_check = time.time()
 
     while True:
         try:
@@ -434,6 +474,17 @@ def run_bot():
                 if positions:
                     check_positions(TELEGRAM_CHAT_ID)
                 last_tp_check = now
+
+            # Confirmation polling (staged mode only)
+            if not LEGACY_IMMEDIATE_ALERTS:
+                CONFIRMATION_CHECK_INTERVAL = CONFIRMATION_POLL_MINUTES * 60
+                if now - last_confirmation_check >= CONFIRMATION_CHECK_INTERVAL:
+                    from src.pipeline import run_phase2_confirmation
+                    confirmed = run_phase2_confirmation()
+                    if confirmed:
+                        send_message(TELEGRAM_CHAT_ID,
+                            f"<b>✅ Confirmation check</b> — {len(confirmed)} result(s)")
+                    last_confirmation_check = now
 
         except KeyboardInterrupt:
             print("Shutting down...")

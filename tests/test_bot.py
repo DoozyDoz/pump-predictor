@@ -53,9 +53,9 @@ class TestBuildMainMenu:
         menu = build_main_menu()
         assert menu["keyboard"][0] == ["🔍 Scan", "📊 Positions"]
 
-    def test_second_row_help(self):
+    def test_second_row_watchlist_and_help(self):
         menu = build_main_menu()
-        assert menu["keyboard"][1] == ["❓ Help"]
+        assert menu["keyboard"][1] == ["👁 Watchlist", "❓ Help"]
 
     def test_resize_keyboard_is_true(self):
         menu = build_main_menu()
@@ -133,13 +133,14 @@ class TestButtonNormalization:
     """Verify that emoji-prefixed button texts are normalized to commands
     and that free-text commands are NOT affected."""
 
-    @patch("src.pipeline.run_daily", return_value=[])
+    @patch("src.pipeline.run_phase2_confirmation", return_value=[])
+    @patch("src.pipeline.run_phase1_watchlist", return_value=[])
     @patch("src.bot.send_message")
-    def test_scan_button_dispatches_scan(self, mock_send, mock_run_daily):
+    def test_scan_button_dispatches_scan(self, mock_send, mock_wl, mock_conf):
         """Tapping "🔍 Scan" should normalise to "scan" and run the scan pipeline."""
         handle_message({"text": "🔍 Scan", "chat": {"id": "123"}})
-        assert mock_run_daily.called, (
-            "run_daily should have been called when '🔍 Scan' normalizes to 'scan'"
+        assert mock_wl.called or mock_conf.called, (
+            "pipeline functions should have been called when '🔍 Scan' normalizes to 'scan'"
         )
 
     @patch("src.bot.get_active_positions", return_value=[])
@@ -160,14 +161,15 @@ class TestButtonNormalization:
         sent_text = mock_send.call_args[0][1]
         assert "Alpha Bot" in sent_text
 
-    @patch("src.pipeline.run_daily", return_value=[])
+    @patch("src.pipeline.run_phase2_confirmation", return_value=[])
+    @patch("src.pipeline.run_phase1_watchlist", return_value=[])
     @patch("src.bot.send_message")
-    def test_typing_scan_manually_still_works(self, mock_send, mock_run_daily):
+    def test_typing_scan_manually_still_works(self, mock_send, mock_wl, mock_conf):
         """Typing 'scan' (without an emoji prefix) must NOT be normalised and must
         still dispatch to the scan handler."""
         handle_message({"text": "scan", "chat": {"id": "123"}})
-        assert mock_run_daily.called, (
-            "run_daily should still be called for plain 'scan'"
+        assert mock_wl.called or mock_conf.called, (
+            "pipeline functions should still be called for plain 'scan'"
         )
 
     @patch("src.bot.get_active_positions", return_value=[])
@@ -303,14 +305,17 @@ class TestStartupMessage:
 class TestMENU_BUTTONS:
     """Verify the MENU_BUTTONS mapping has the expected structure."""
 
-    def test_has_three_buttons(self):
-        assert len(MENU_BUTTONS) == 3
+    def test_has_four_buttons(self):
+        assert len(MENU_BUTTONS) == 4
 
     def test_scan_maps_to_scan(self):
         assert MENU_BUTTONS["🔍 Scan"] == "scan"
 
     def test_positions_maps_to_positions(self):
         assert MENU_BUTTONS["📊 Positions"] == "positions"
+
+    def test_watchlist_maps_to_watchlist(self):
+        assert MENU_BUTTONS["👁 Watchlist"] == "watchlist"
 
     def test_help_maps_to_help(self):
         assert MENU_BUTTONS["❓ Help"] == "help"

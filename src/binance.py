@@ -287,3 +287,76 @@ class TakerHistory:
         if len(past) == 0:
             return None
         return (np.sum(past <= value) / len(past)) * 100
+
+
+# ---------------------------------------------------------------------------
+# ATR computation
+# ---------------------------------------------------------------------------
+
+def get_atr(symbol: str, period: int = 14, interval: str = "1h") -> float | None:
+    """Compute Average True Range as a percentage of current price."""
+    candles = get_klines(symbol, interval=interval, limit=period * 2, market="spot")
+    if not candles or len(candles) < period + 1:
+        return None
+
+    tr_values = []
+    prev_close = None
+    for c in candles:
+        high = c.get("h", 0)
+        low = c.get("l", 0)
+        close = c.get("c", 0)
+        if not high or not low or not close:
+            continue
+        if prev_close is None:
+            tr_values.append(high - low)
+        else:
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            tr_values.append(tr)
+        prev_close = close
+
+    if len(tr_values) < period:
+        return None
+
+    atr = sum(tr_values[-period:]) / period
+    current_price = candles[-1].get("c", 0)
+    if current_price <= 0:
+        return None
+    return (atr / current_price) * 100
+
+
+# ---------------------------------------------------------------------------
+# Data quality helpers
+# ---------------------------------------------------------------------------
+
+def check_data_freshness(symbol: str) -> dict:
+    """Check if recent ticker data is available and not stale.
+    Returns {"fresh": bool, "last_update": str, "stale_hours": float}."""
+    try:
+        ticker = get_24h_ticker(symbol)
+        now = datetime.utcnow()
+        # Binance ticker closeTime is the last trade time in ms
+        close_time_ms = ticker.get("closeTime")
+        if close_time_ms:
+            last_update = datetime.utcfromtimestamp(close_time_ms / 1000)
+            stale_hours = (now - last_update).total_seconds() / 3600
+            return {
+                "fresh": stale_hours < 4,
+                "last_update": last_update.isoformat(),
+                "stale_hours": stale_hours,
+            }
+    except Exception:
+        pass
+    return {"fresh": False, "last_update": "", "stale_hours": 999.0}
+
+
+def get_top_tickers(n: int = 10) -> list[dict]:
+    """Get top N tickers by 24h USDT volume.
+    Returns list of ticker dicts sorted by quoteVolume descending."""
+    try:
+        tickers = get_24h_tickers()
+        usdt_pairs = [t for t in tickers
+                      if isinstance(t, dict) and t.get("symbol", "").endswith("USDT")]
+        usdt_pairs.sort(key=lambda t: float(t.get("quoteVolume", 0) or 0), reverse=True)
+        return usdt_pairs[:n]
+    except Exception:
+        return []

@@ -29,18 +29,95 @@ class TelegramNotifier:
         except Exception:
             return False
 
-    def format_alerts(self, alerts: list[dict], portfolio_usd: float) -> str:
-        """Format alerts as a Telegram message."""
+    def format_alerts(self, alerts: list[dict], portfolio_usd: float,
+                      stage: str = "") -> str:
+        """Format alerts as a Telegram message.
+        Dispatches to stage-specific formatter based on stage parameter.
+        Default (empty stage) uses legacy entry format for backward compatibility.
+        """
+        if stage == "watchlist":
+            return self.format_watchlist(alerts)
+        elif stage == "confirmation":
+            return self.format_confirmation(alerts)
+        elif stage == "entry":
+            return self.format_entry(alerts, portfolio_usd)
+        else:
+            return self.format_entry_legacy(alerts, portfolio_usd)
+
+    def format_watchlist(self, candidates: list[dict]) -> str:
+        """Format watchlist candidates."""
+        if not candidates:
+            return f"<b>Watchlist</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n\nNo candidates today."
+
+        lines = [
+            f"<b>Watchlist</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+            f"{len(candidates)} potential setup(s) — monitoring for confirmation.\n",
+        ]
+        for c in candidates:
+            sym = c.get("symbol", "?").replace("USDT", "")
+            score = c.get("score", 0)
+            signals = c.get("fired_signals", "")
+            lines.append(f"<b>{sym}</b> — score {score} | {signals}")
+        lines.append("\n<i>No action needed yet. Waiting for confirmation.</i>")
+        return "\n".join(lines)
+
+    def format_confirmation(self, results: list[dict]) -> str:
+        """Format confirmation results."""
+        if not results:
+            return f"<b>Confirmation Check</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n\nNo active watchlist items."
+
+        confirmed = [r for r in results if r.get("confirmed")]
+        denied = [r for r in results if r.get("denied")]
+        pending = [r for r in results if not r.get("confirmed") and not r.get("denied")]
+
+        lines = [
+            f"<b>Confirmation Check</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+            f"Confirmed: {len(confirmed)} | Denied: {len(denied)} | Pending: {len(pending)}\n",
+        ]
+        for c in confirmed:
+            sym = c.get("symbol", "?").replace("USDT", "")
+            lines.append(f"<b>✅ {sym}</b> — {c.get('reason', '')}")
+            if c.get("promoted_to_entry"):
+                lines.append(f"  ➡ Promoted to entry!")
+        lines.append("\n<i>Confirmed items promoted for entry sizing.</i>")
+        return "\n".join(lines)
+
+    def format_entry(self, entries: list[dict], portfolio_usd: float) -> str:
+        """Format final entry signals with ATR sizing."""
+        pos_size = portfolio_usd * POSITION_SIZE_PCT
+
+        if not entries:
+            return (f"<b>Entry Check</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+                    f"\n\nNo entry signals today.")
+
+        lines = [
+            f"<b>ENTRY SIGNALS</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+            f"Portfolio: ${portfolio_usd:.0f}\n",
+        ]
+        for e in entries:
+            sym = e.get("symbol", "?").replace("USDT", "")
+            atr = e.get("atr_pct", "?")
+            size = e.get("position_size_usd", f"{pos_size:.2f}")
+            lines.append(f"<b>BUY ${sym}</b>")
+            lines.append(f"  Size: ${size} | ATR: {atr}")
+            if "fired_signals" in e:
+                lines.append(f"  Signals: {e['fired_signals']}")
+            lines.append("")
+
+        lines.append("<i>⚠️ Always 5-min sanity check before placing orders.</i>")
+        return "\n".join(lines)
+
+    def format_entry_legacy(self, alerts: list[dict], portfolio_usd: float) -> str:
+        """Original entry alert formatting (preserved for legacy mode)."""
         pos_size = portfolio_usd * POSITION_SIZE_PCT
 
         if not alerts:
-            return f"<b>🔍 Pump Scan</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n\nNo alerts today. All quiet."
+            return f"<b>Pump Scan</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n\nNo alerts today. All quiet."
 
         lines = [
-            f"<b>🚀 PUMP ALERTS</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
-            f"Portfolio: ${portfolio_usd:.0f} | Size: ${pos_size:.0f} | ≥{ALERT_THRESHOLD}/5\n",
+            f"<b>PUMP ALERTS</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+            f"Portfolio: ${portfolio_usd:.0f} | Size: ${pos_size:.0f} | >= {ALERT_THRESHOLD}/5\n",
         ]
-
         for a in alerts:
             sym = a['symbol'].replace('USDT', '')
             score = a['quant_score']
@@ -59,32 +136,27 @@ class TelegramNotifier:
             if scan_status == "PARTIAL":
                 lines.append("⚠️ <b>SCAN PARTIAL — do not execute live</b>")
 
-            # Quantitative reasoning
             if signals:
-                lines.append(f"\n<i>📊 Quantitative:</i>")
+                lines.append(f"\n<i>Quantitative:</i>")
                 for sig in signals.split('|'):
                     reason = _telegram_quant_reason(sig, a)
                     lines.append(f"  ✓ {reason}")
 
-            # Qualitative reasoning
             if qual_tags:
-                lines.append(f"\n<i>📰 Qualitative:</i>")
+                lines.append(f"\n<i>Qualitative:</i>")
                 for tag in qual_tags.split(' | '):
                     tag = tag.strip()
                     if ':' in tag:
                         _, desc = tag.split(':', 1)
                         lines.append(f"  • {desc.strip()}")
 
-            # Verdict
-            lines.append(f"\n<i>⚡ Verdict:</i> {_telegram_verdict(signals, qual_tags)}")
-
-            # Action block
-            lines.append(f"\n<code>🎯 ACTION:</code>")
+            lines.append(f"\n<i>Verdict:</i> {_telegram_verdict(signals, qual_tags)}")
+            lines.append(f"\n<code>ACTION:</code>")
             lines.append(f"  <b>{sym}USDT</b> | Market | ${pos_size:.0f}")
             lines.append(f"  Stop: -7% | TP: +15%/+25% | Trail: -3%")
             lines.append("")
 
-        lines.append("<i>⚠️ Always 5-min sanity check before placing orders.</i>")
+        lines.append("<i>Always 5-min sanity check before placing orders.</i>")
         return "\n".join(lines)
 
 

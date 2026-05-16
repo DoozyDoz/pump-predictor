@@ -13,14 +13,17 @@ All data from Binance public APIs (spot + fapi + futures/data).
 from datetime import datetime, timedelta
 from typing import Optional
 from dataclasses import dataclass, field as _dc_field
+from dataclasses import dataclass as _dc
 from src.config import (
     FUNDING_PERCENTILE, FUNDING_CROSS_SECTIONAL_PCT, FUNDING_HISTORY_DAYS,
     OI_DIVERGENCE_LOOKBACK_DAYS, OI_DIVERGENCE_HISTORY_DAYS,
     OI_DIVERGENCE_PERCENTILE, OI_DIVERGENCE_CROSS_SECTIONAL_PCT,
     OI_PRICE_MAX_RISE_PCT,
     LS_RATIO_HISTORY_DAYS, LS_RATIO_PERCENTILE, LS_RATIO_CROSS_SECTIONAL_PCT,
+    TAKER_RATIO_HISTORY_MS, TAKER_RATIO_PERCENTILE,
 )
 from src.binance import (
+    TakerHistory,
     get_funding_rate, get_funding_rate_history,
     get_open_interest_history, get_klines,
     get_global_ls_ratio_history,
@@ -49,6 +52,8 @@ class OIDivergenceSignal:
     divergence: float          # oi_change - price_change
     percentile_90d: float
     cross_sectional_pct: float
+    oi_trend: str = "flat"    # 'rising', 'falling', 'flat'
+    price_trend: str = "flat" # 'rising', 'falling', 'flat'
     fired: bool = False
 
 
@@ -58,6 +63,16 @@ class LSRatioSignal:
     perp_symbol: str
     current_ratio: float
     percentile_90d: float
+    cross_sectional_pct: float
+    fired: bool = False
+
+
+@dataclass
+class TakerRatioSignal:
+    symbol: str
+    binance_symbol: str
+    current_ratio: float
+    percentile_21d: float
     cross_sectional_pct: float
     fired: bool = False
 
@@ -131,7 +146,6 @@ def compute_oi_divergence_signal(spot_symbol: str) -> Optional[OIDivergenceSigna
     Bullish when OI rises while price stays flat or falls (accumulation).
     """
     to_dt = datetime.utcnow()
-    from_dt = to_dt - timedelta(days=OI_DIVERGENCE_HISTORY_DAYS)
 
     # OI from Binance futures/data + local snapshots
     try:
@@ -170,6 +184,8 @@ def compute_oi_divergence_signal(spot_symbol: str) -> Optional[OIDivergenceSigna
         oi_change_pct=oi_change, price_change_pct=price_change,
         divergence=divergence, percentile_90d=percentile,
         cross_sectional_pct=0.0,
+        oi_trend=_classify_trend(oi_change),
+        price_trend=_classify_trend(price_change),
     )
 
 
@@ -183,6 +199,8 @@ def finalize_oi_divergence_signals(signals: list[OIDivergenceSignal]) -> list[OI
             s.percentile_90d >= OI_DIVERGENCE_PERCENTILE
             and s.cross_sectional_pct >= (100 - OI_DIVERGENCE_CROSS_SECTIONAL_PCT)
             and s.price_change_pct < OI_PRICE_MAX_RISE_PCT
+            and s.oi_trend == "rising"
+            and s.price_trend in ("falling", "flat")
         )
     return signals
 
@@ -364,6 +382,16 @@ def compute_ls_ratio_backtest(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _classify_trend(pct_change: float, rising_threshold: float = 2.0,
+                    falling_threshold: float = -2.0) -> str:
+    """Classify a percentage change as 'rising', 'falling', or 'flat'."""
+    if pct_change >= rising_threshold:
+        return "rising"
+    elif pct_change <= falling_threshold:
+        return "falling"
+    return "flat"
+
+
 def _merge_histories(binance: list[dict], local: list[dict],
                      key: str = "c") -> list[dict]:
     """Merge Binance history with local snapshots, dedup by timestamp."""
@@ -476,25 +504,12 @@ def _build_divergence_history_before(
 # ============================================================================
 # Signal 4: Taker buy/sell ratio extreme (Binance)
 # ============================================================================
-from dataclasses import dataclass as _dc
-
-@_dc
-class TakerRatioSignal:
-    symbol: str
-    binance_symbol: str
-    current_ratio: float
-    percentile_21d: float
-    cross_sectional_pct: float
-    fired: bool = False
-
 
 def compute_taker_ratio_signal(
     spot_symbol: str,
-    taker_history: 'TakerHistory',
+    taker_history: TakerHistory,
 ) -> Optional[TakerRatioSignal]:
     """Compute taker ratio extreme from pre-fetched history."""
-    from src.config import TAKER_RATIO_HISTORY_MS, TAKER_RATIO_PERCENTILE
-
     dt = datetime.utcnow()
     current = taker_history.at(dt)
     if current is None:

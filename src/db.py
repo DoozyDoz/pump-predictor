@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     token_id INTEGER NOT NULL REFERENCES tokens(id),
     signal_id INTEGER REFERENCES signals(id),
     pump_score INTEGER NOT NULL,
-    fired_signals TEXT NOT NULL,  -- JSON array of signal names
+    fired_signals TEXT NOT NULL,
+    stage TEXT DEFAULT 'entry',
     alert_ts TEXT NOT NULL DEFAULT (datetime('now')),
     reviewed BOOLEAN DEFAULT FALSE,
     trade_placed BOOLEAN DEFAULT FALSE,
@@ -119,6 +120,28 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     avg_loss_pct REAL,
     max_drawdown_pct REAL
 );
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id INTEGER NOT NULL REFERENCES tokens(id),
+    symbol TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    signals_fired TEXT NOT NULL,
+    catalyst_boost REAL DEFAULT 0.0,
+    added_ts TEXT NOT NULL DEFAULT (datetime('now')),
+    expired BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS stage_progression (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watchlist_id INTEGER REFERENCES watchlist(id),
+    token_id INTEGER NOT NULL REFERENCES tokens(id),
+    stage TEXT NOT NULL,
+    entered_ts TEXT NOT NULL DEFAULT (datetime('now')),
+    promoted_ts TEXT,
+    expired_ts TEXT,
+    reason TEXT
+);
 """
 
 
@@ -151,6 +174,14 @@ def init_db():
         for col, col_def in [
             ("tp1_filled", "REAL DEFAULT 0"),
             ("realized_pnl", "REAL DEFAULT 0"),
+            ("stage", "TEXT DEFAULT 'entry'"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} {col_def}")
+            except Exception:
+                pass  # column already exists
+        for col, col_def in [
+            ("stage", "TEXT DEFAULT 'entry'"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {col_def}")

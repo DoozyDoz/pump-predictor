@@ -1,8 +1,12 @@
-"""Daily batch pipeline: 5 quantitative signals + qualitative boost → alerts."""
+"""Daily batch pipeline: 5 quantitative signals + qualitative boost → alerts.
+
+Supports staged workflow (watchlist → confirmation → entry) and legacy
+immediate-alert mode controlled by LEGACY_IMMEDIATE_ALERTS config flag.
+"""
 
 import csv, json
 from datetime import datetime
-from src.config import ALERT_THRESHOLD, POSITION_SIZE_PCT
+from src.config import ALERT_THRESHOLD, POSITION_SIZE_PCT, LEGACY_IMMEDIATE_ALERTS
 from src.db import db_session, init_db
 from src.universe import refresh_universe, daily_volume_check
 from src.signals import (
@@ -20,6 +24,11 @@ from src.qualitative import (
     QualitativeTag, TokenQualitativeProfile,
     check_defillama_metrics, qualitative_override,
 )
+from src.watchlist import generate_watchlist
+from src.stages import StageManager
+from src.regime import detect_regime, is_suppressed, MarketRegime
+from src.risk import compute_atr, position_size as risk_position_size
+from src.notify import TelegramNotifier
 
 # Token → CoinGecko ID mapping (build from API, cache locally)
 import os as _os
@@ -39,60 +48,34 @@ def _save_mapping(m: dict):
         json.dump(m, f, indent=2)
 
 
-def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0):
-    init_db()
-    run_ts = datetime.utcnow().isoformat()
-    mapping = _load_mapping()
-
-    if symbols is None:
-        symbols = refresh_universe()
-    symbols = daily_volume_check(symbols)
-    sym_names = [s.replace("USDT", "") for s in symbols]
-    print(f"Universe: {len(symbols)} tokens")
-
-    # ---- Tier 1: Critical (must succeed) ----
+def _compute_signals(symbols):
+    """Run all 5 quantitative signal computations.
+    Returns (funding_signals, oi_signals, ls_signals, taker_signals, book_signals,
+             scan_status, scan_errors, deep_check_syms)."""
     scan_status = "FULL"
     scan_errors = []
 
-    # Binance 24h tickers (single API call for all tokens)
-    try:
-        all_tickers = {t["symbol"]: t for t in get_24h_tickers()}
-    except Exception as e:
-        print(f"SCAN FAILED: cannot fetch 24h tickers — {e}")
-        return []
-
-    # ---- Phase 1a: Pre-filter — batch funding rates (1 API call) ----
-    try:
-        all_funding_rates = get_bulk_funding_rates(symbols)
-    except Exception as e:
-        print(f"SCAN FAILED: cannot fetch funding rates — {e}")
-        return []
-    if not all_funding_rates:
-        print("SCAN FAILED: empty funding rate response")
-        return []
-
-    funding_present = [(s, all_funding_rates[s]) for s in symbols
-                       if s in all_funding_rates]
-    # Deep-check ALL tokens with funding data. The old Coinalyze-era
-    # optimization (only negative funding) is no longer needed with Binance.
-    # Funding is contrarian only — it doesn't need to fire for a buy.
-    deep_check_syms = [s for s, _ in funding_present]
-    neg_funding_syms = [s for s, r in funding_present if r < 0]
-    print(f"Pre-filter: {len(funding_present)} with funding, {len(neg_funding_syms)} negative, "
-          f"deep-checking all {len(deep_check_syms)}")
-
-    # ---- Quantitative signals ----
     # S1: Funding-rate extreme (all tokens)
     try:
         funding_signals = compute_all_funding_signals(symbols)
     except Exception as e:
         print(f"SCAN FAILED: funding signal computation failed — {e}")
-        return []
-    n1 = sum(1 for s in funding_signals if s.fired)
+        return None
 
-    # S2-S4: OI, LS, Taker on deep-check tokens (Tier 2 — degrade gracefully)
+    # S2-S4: OI, LS, Taker on deep-check symbols
+    try:
+        all_funding_rates = get_bulk_funding_rates(symbols)
+    except Exception as e:
+        print(f"SCAN FAILED: cannot fetch funding rates — {e}")
+        return None
+    if not all_funding_rates:
+        print("SCAN FAILED: empty funding rate response")
+        return None
+
+    funding_present = [(s, all_funding_rates[s]) for s in symbols if s in all_funding_rates]
+    deep_check_syms = [s for s, _ in funding_present]
+
     oi_signals, ls_signals, taker_signals = [], [], []
-
     for sym in deep_check_syms:
         try:
             s = compute_oi_divergence_signal(sym)
@@ -116,9 +99,6 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0):
     oi_signals = finalize_oi_divergence_signals(oi_signals)
     ls_signals = finalize_ls_ratio_signals(ls_signals)
     taker_signals = finalize_taker_signals(taker_signals)
-    n2 = sum(1 for s in oi_signals if s.fired)
-    n3 = sum(1 for s in ls_signals if s.fired)
-    n4 = sum(1 for s in taker_signals if s.fired)
 
     if len(oi_signals) == 0:
         scan_errors.append("OI")
@@ -127,7 +107,7 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0):
         scan_errors.append("LS")
         scan_status = "PARTIAL"
 
-    # S5: Order book — only on tokens with ≥1 other signal firing
+    # S5: Order book — on tokens with >= 1 other signal firing
     book_signals = []
     fired_set = set()
     for sig_list in [oi_signals, ls_signals, taker_signals]:
@@ -140,7 +120,6 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0):
 
     book_candidates = [s for s in deep_check_syms if s in fired_set]
     if book_candidates:
-        print(f"Order book: gated to {len(book_candidates)} tokens (≥1 other signal)")
         for sym in book_candidates:
             try:
                 s = compute_order_book_signal(sym)
@@ -148,21 +127,63 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0):
             except Exception:
                 pass
         book_signals = finalize_order_book_signals(book_signals)
-    n5 = sum(1 for s in book_signals if s.fired)
 
+    n1 = sum(1 for s in funding_signals if s.fired)
+    n2 = sum(1 for s in oi_signals if s.fired)
+    n3 = sum(1 for s in ls_signals if s.fired)
+    n4 = sum(1 for s in taker_signals if s.fired)
+    n5 = sum(1 for s in book_signals if s.fired)
     status_line = f"Fires — Fund:{n1} OI:{n2} LS:{n3} Taker:{n4} Book:{n5}"
     if scan_status == "PARTIAL":
         status_line += f" | SCAN PARTIAL (missing: {', '.join(scan_errors)})"
     print(status_line)
 
-    # ---- Store signal snapshots for local history ----
+    return (funding_signals, oi_signals, ls_signals, taker_signals, book_signals,
+            scan_status, scan_errors, deep_check_syms, all_funding_rates)
+
+
+def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0,
+              legacy: bool | None = None):
+    """
+    Run the daily batch pipeline.
+    If legacy=True (or LEGACY_IMMEDIATE_ALERTS is True), uses the old
+    immediate-alert behavior. Otherwise runs Phase 1 (watchlist generation)
+    of the staged workflow.
+    """
+    if legacy is None:
+        legacy = LEGACY_IMMEDIATE_ALERTS
+
+    if not legacy:
+        return run_phase1_watchlist(symbols, portfolio_usd)
+
+    # ---- Legacy mode: original immediate-alert behavior ----
+    init_db()
+    run_ts = datetime.utcnow().isoformat()
+    mapping = _load_mapping()
+
+    if symbols is None:
+        symbols = refresh_universe()
+    symbols = daily_volume_check(symbols)
+    sym_names = [s.replace("USDT", "") for s in symbols]
+    print(f"Universe: {len(symbols)} tokens")
+
+    try:
+        all_tickers = {t["symbol"]: t for t in get_24h_tickers()}
+    except Exception as e:
+        print(f"SCAN FAILED: cannot fetch 24h tickers — {e}")
+        return []
+
+    result = _compute_signals(symbols)
+    if result is None:
+        return []
+    (funding_signals, oi_signals, ls_signals, taker_signals, book_signals,
+     scan_status, scan_errors, deep_check_syms, all_funding_rates) = result
+
     _store_snapshots(symbols, all_funding_rates, oi_signals, ls_signals,
                      taker_signals, run_ts)
 
-    # ---- Qualitative signals ----
     qualitative_profiles = _build_qualitative(symbols, sym_names, all_tickers, mapping)
 
-    # ---- Build alerts ----
     alerts = _build_alerts(
         funding_signals, oi_signals, ls_signals, taker_signals, book_signals,
         qualitative_profiles, run_ts, portfolio_usd, scan_status,
@@ -175,8 +196,150 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0):
     else:
         _write_empty_csv(run_ts)
         print("No pump alerts today.")
-        _send_telegram([], portfolio_usd)  # optionally silence no-alert days
+        _send_telegram([], portfolio_usd)
     return alerts
+
+
+# ---------------------------------------------------------------------------
+# Staged workflow phases
+# ---------------------------------------------------------------------------
+
+def run_phase1_watchlist(symbols: list[str] | None = None,
+                         portfolio_usd: float = 1000.0) -> list[dict]:
+    """Phase 1: Generate watchlist from raw signals. No buy alerts sent."""
+    init_db()
+    run_ts = datetime.utcnow().isoformat()
+    mapping = _load_mapping()
+
+    if symbols is None:
+        symbols = refresh_universe()
+    symbols = daily_volume_check(symbols)
+    sym_names = [s.replace("USDT", "") for s in symbols]
+    print(f"Universe: {len(symbols)} tokens")
+    print("Phase 1: Watchlist generation (staged mode)")
+
+    # 24h tickers
+    try:
+        all_tickers = {t["symbol"]: t for t in get_24h_tickers()}
+    except Exception as e:
+        print(f"SCAN FAILED: cannot fetch 24h tickers — {e}")
+        return []
+
+    # Quantitative signals
+    result = _compute_signals(symbols)
+    if result is None:
+        return []
+    (funding_signals, oi_signals, ls_signals, taker_signals, book_signals,
+     scan_status, scan_errors, deep_check_syms, all_funding_rates) = result
+
+    _store_snapshots(symbols, all_funding_rates, oi_signals, ls_signals,
+                     taker_signals, run_ts)
+
+    # Qualitative signals
+    qualitative_profiles = _build_qualitative(symbols, sym_names, all_tickers, mapping)
+
+    # Market regime filter
+    regime = detect_regime()
+    print(f"Market regime: {regime.value}")
+    if is_suppressed(regime):
+        print("Regime UNFAVORABLE: watchlist generation suppressed")
+        return []
+
+    # Generate watchlist
+    candidates = generate_watchlist(
+        funding_signals, oi_signals, ls_signals, taker_signals, book_signals,
+        qualitative_profiles, regime,
+    )
+
+    if candidates:
+        print(f"Watchlist: {len(candidates)} candidates added")
+        msg = f"<b>Watchlist updated</b> — {len(candidates)} candidate(s) for confirmation."
+        _send_telegram_stage(msg, stage="watchlist")
+    else:
+        print("No watchlist candidates today.")
+        _send_telegram_stage("<b>Watchlist</b> — No candidates today.", stage="watchlist")
+
+    return candidates
+
+
+def run_phase2_confirmation() -> list[dict]:
+    """Phase 2: Check watchlist candidates for confirmation (intraday polling)."""
+    from src.confirmation import ConfirmationChecker
+
+    stage_mgr = StageManager()
+    checker = ConfirmationChecker(stage_mgr)
+    results = checker.run_confirmation()
+
+    if not results:
+        return []
+
+    confirmed = [r for r in results if r.get("confirmed")]
+    denied = [r for r in results if r.get("denied")]
+    promoted = [r for r in confirmed if r.get("promoted_to_entry")]
+
+    if confirmed:
+        print(f"Confirmation: {len(confirmed)} confirmed, {len(promoted)} promoted to entry")
+        for c in confirmed:
+            print(f"  {c['symbol']}: {c.get('reason', '')}")
+    if denied:
+        print(f"  {len(denied)} denied/expired")
+
+    return results
+
+
+def run_phase3_entry(confirmed_entries: list[dict] | None = None,
+                     portfolio_usd: float = 1000.0) -> list[dict]:
+    """Phase 3: Final entry signal with ATR sizing for confirmed entries."""
+    stage_mgr = StageManager()
+
+    if confirmed_entries is None:
+        entries = stage_mgr.get_by_stage("entry")
+    else:
+        entries = confirmed_entries
+
+    if not entries:
+        return []
+
+    entry_signals = []
+    for e in entries:
+        sym = e["symbol"]
+        atr_val = compute_atr(sym)
+        if atr_val is None or atr_val <= 0:
+            atr_val = 2.0  # fallback
+
+        pos_size = risk_position_size(atr_val, portfolio_usd)
+        entry_signals.append({
+            "symbol": sym,
+            "atr_pct": f"{atr_val:.2f}%",
+            "position_size_usd": f"{pos_size:.2f}",
+            "score": e.get("score", 0),
+            "fired_signals": e.get("signals_fired", ""),
+        })
+
+    # Send entry alerts
+    msg_lines = [f"<b>ENTRY SIGNALS</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", ""]
+    for s in entry_signals:
+        sym = s["symbol"].replace("USDT", "")
+        msg_lines.append(f"<b>BUY ${sym}</b>")
+        msg_lines.append(f"  Size: ${s['position_size_usd']} | ATR: {s['atr_pct']}")
+        msg_lines.append("")
+    _send_telegram_stage("\n".join(msg_lines), stage="entry")
+
+    print(f"Entry signals: {len(entry_signals)} confirmed trades")
+    return entry_signals
+
+
+def _send_telegram_stage(msg: str, stage: str = "watchlist"):
+    """Send a stage-specific message via Telegram."""
+    from src.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        notifier = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+        ok = notifier.send(msg)
+        print(f"Telegram ({stage}): {'sent' if ok else 'failed'}")
+    except Exception as e:
+        print(f"Telegram error ({stage}): {e}")
 
 
 def _build_qualitative(symbols, sym_names, all_tickers, mapping):

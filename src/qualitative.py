@@ -105,11 +105,21 @@ class TokenQualitativeProfile:
 
     def add_tag(self, tag: QualitativeTag):
         self.tags.append(tag)
-        # Only non-binance_24h sources contribute to catalyst_boost.
-        # 24h ticker tags (volume, momentum, trades) are display-only context.
-        if tag.source != "binance_24h":
-            self.catalyst_boost = min(1.0,
-                                      self.catalyst_boost + tag.confidence)
+        self._recompute_catalyst_boost()
+
+    def _recompute_catalyst_boost(self):
+        """Recompute catalyst_boost by taking max confidence per unique catalyst_type,
+        then summing across catalyst types, capped at 1.0.
+        This prevents multiple tags from the same event (same catalyst_type)
+        from over-boosting the score."""
+        max_per_type = {}
+        for tag in self.tags:
+            if tag.source != "binance_24h":
+                existing = max_per_type.get(tag.catalyst_type, 0.0)
+                if tag.confidence > existing:
+                    max_per_type[tag.catalyst_type] = tag.confidence
+        total = sum(max_per_type.values())
+        self.catalyst_boost = min(1.0, total)
 
     def recent_tags(self, hours: int = 168) -> list[QualitativeTag]:
         cutoff = datetime.utcnow() - timedelta(hours=hours)
@@ -188,12 +198,16 @@ def check_github_activity(repo: str, since_days: int = 30) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def compute_qualitative_boost(profile: TokenQualitativeProfile) -> float:
-    """Recompute catalyst boost from stored tags (non-binance_24h sources only)."""
-    cat_boost = 0.0
+    """Recompute catalyst boost from stored tags (non-binance_24h sources only).
+    Uses max confidence per unique catalyst_type to prevent over-boosting."""
+    max_per_type = {}
     for tag in profile.tags:
         if tag.source != "binance_24h":
-            cat_boost = min(1.0, cat_boost + tag.confidence)
-    return cat_boost
+            existing = max_per_type.get(tag.catalyst_type, 0.0)
+            if tag.confidence > existing:
+                max_per_type[tag.catalyst_type] = tag.confidence
+    total = sum(max_per_type.values())
+    return min(1.0, total)
 
 
 def qualitative_override(pump_score: int, catalyst_boost: float,

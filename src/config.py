@@ -65,3 +65,48 @@ GO_PROFIT_FACTOR = 1.5
 BACKTEST_YEARS = 2
 BACKTEST_TRAIN_MONTHS = 0   # no train window — fixed thresholds, no optimization
 BACKTEST_TEST_MONTHS = 1    # 1 month test fits Binance 30d OI/LS window
+
+# ---------------------------------------------------------------------------
+# Stage thresholds (staged workflow)
+# ---------------------------------------------------------------------------
+WATCHLIST_THRESHOLD = 1       # signals needed for watchlist (lower = cast wider net)
+CONFIRMATION_THRESHOLD = 2    # signals needed for confirmation stage
+ENTRY_THRESHOLD = 3           # signals needed for full entry alert
+
+# ---------------------------------------------------------------------------
+# ATR-based risk parameters
+# ---------------------------------------------------------------------------
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+ATR_RISK_PER_TRADE_PCT = 0.01
+
+# ---------------------------------------------------------------------------
+# Market regime parameters
+# ---------------------------------------------------------------------------
+REGIME_ENABLED = True
+REGIME_BTC_DOM_UPPER = 60.0   # BTC dominance above this = altcoin suppression
+REGIME_VOLATILITY_UPPER = 80.0  # avg 24h range across top tokens above this = high vol
+
+# ---------------------------------------------------------------------------
+# Confirmation polling parameters
+# ---------------------------------------------------------------------------
+CONFIRMATION_POLL_MINUTES = 30
+CONFIRMATION_PRICE_MOVE_PCT = 0.5   # minimum price bounce from recent low (%)
+CONFIRMATION_VOLUME_SURGE_PCT = 50.0  # volume surge above 24h average (%)
+
+# ---------------------------------------------------------------------------
+# Data quality
+# ---------------------------------------------------------------------------
+STALE_DATA_HOURS = 4
+MIN_DATA_POINTS = 10
+
+# ---------------------------------------------------------------------------
+# Backward compatibility
+# ---------------------------------------------------------------------------
+LEGACY_IMMEDIATE_ALERTS = False  # set True to revert to old immediate-alert behavior
+
+# ---------------------------------------------------------------------------
+# Stage TTL
+# ---------------------------------------------------------------------------
+WATCHLIST_TTL_HOURS = 72
+CONFIRMATION_TTL_HOURS = 24

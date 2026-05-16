@@ -426,3 +426,230 @@ def print_summary(results):
     print(f"Mean window PF:   {avg_pf:.2f}")
     print(f"GO/NO-GO:         {'*** GO ***' if go else '--- NO-GO ---'}")
     print("=" * 60)
+
+
+def run_staged_backtest(spot_symbols: list[str], max_symbols: int = 0) -> list[BacktestWindow]:
+    """
+    Backtest that simulates the 3-stage workflow:
+      Phase 1: Signal computation -> watchlist candidates (lower threshold)
+      Phase 2: Confirmation checks after N hours
+      Phase 3: Entry with ATR-based sizing
+
+    Compares precision/profit factor against current immediate-alert approach.
+    """
+    if max_symbols and max_symbols < len(spot_symbols):
+        spot_symbols = spot_symbols[:max_symbols]
+
+    from src.config import WATCHLIST_THRESHOLD, CONFIRMATION_POLL_MINUTES
+    from src.config import CONFIRMATION_PRICE_MOVE_PCT
+
+    end = datetime.utcnow()
+
+    print(f"Fetching Binance data for {len(spot_symbols)} symbols (staged backtest)...")
+    from src.snapshots import get_snapshot_history
+    fund_h, oi_h, ls_h, ohlcv_h = {}, {}, {}, {}
+    for sym in spot_symbols:
+        fund_candles = _merge_backtest(_fetch_bn(sym, "funding"),
+                                       get_snapshot_history(sym, "funding_rate", 365), "c")
+        oi_candles = _merge_backtest(_fetch_bn(sym, "oi"),
+                                     get_snapshot_history(sym, "oi_value", 365), "c")
+        ls_candles = _merge_backtest(_fetch_bn(sym, "ls"),
+                                     get_snapshot_history(sym, "ls_ratio", 365), "r")
+        fund_h[sym] = SortedHistory(fund_candles, "c")
+        oi_h[sym] = SortedHistory(oi_candles, "c")
+        ls_h[sym] = SortedHistory(ls_candles, "r")
+        ohlcv_h[sym] = _fetch_bn(sym, "ohlcv")
+
+    print("Fetching Binance taker ratio data...")
+    taker_h = {}
+    for sym in spot_symbols:
+        try:
+            candles = get_taker_ratio_history(sym, period="1h", limit=500)
+            taker_h[sym] = TakerHistory(candles) if candles else None
+        except Exception:
+            taker_h[sym] = None
+
+    # Determine data range
+    actual_start = end
+    for sym in spot_symbols:
+        for h in [fund_h.get(sym), oi_h.get(sym), ls_h.get(sym)]:
+            if h and len(h) > 0:
+                ts = datetime.utcfromtimestamp(int(h.ts[0]))
+                if ts < actual_start:
+                    actual_start = ts
+    actual_start += timedelta(days=7)
+    if actual_start >= end:
+        print("ERROR: Not enough data")
+        return []
+
+    print(f"Staged backtest: {actual_start.date()} -> {end.date()} | {len(spot_symbols)} tokens")
+
+    all_dates = set()
+    for sym in spot_symbols:
+        for c in ohlcv_h.get(sym, []):
+            t = c.get("t")
+            if t:
+                all_dates.add(datetime.utcfromtimestamp(t).date())
+    dates = sorted(all_dates)
+    test_dates = [d for d in dates if d >= actual_start.date() and d <= end.date()]
+
+    windows = _gen_windows(datetime.combine(dates[0], datetime.min.time()),
+                           datetime.combine(dates[-1], datetime.min.time()))
+    results = []
+
+    for w in windows:
+        ws = datetime.fromisoformat(w.test_start).date()
+        we = datetime.fromisoformat(w.test_end).date()
+        w_dates = [d for d in test_dates if ws <= d <= we][::5]
+        if len(w_dates) < 3:
+            continue
+
+        print(f"Window: {ws} -> {we} ({len(w_dates)} checkpoints)", end=" ", flush=True)
+
+        for d in w_dates:
+            dt_phase1 = datetime.combine(d, datetime.min.time())
+
+            # Same cross-sectional snapshots as run_backtest
+            fund_snap = {}
+            oi_snap = {}
+            ls_snap = {}
+            taker_snap = {}
+            price_snap = {}
+            price_chg_snap = {}
+            for sym in spot_symbols:
+                fr = fund_h[sym].at(dt_phase1) if sym in fund_h else None
+                if fr is not None:
+                    fund_snap[sym] = fr
+                oi_now = oi_h[sym].at(dt_phase1) if sym in oi_h else None
+                oi_then = oi_h[sym].at(dt_phase1 - timedelta(days=7)) if sym in oi_h else None
+                px_now = _price_at(ohlcv_h.get(sym, []), dt_phase1)
+                px_then = _price_at(ohlcv_h.get(sym, []), dt_phase1 - timedelta(days=7))
+                if all([oi_now, oi_then, px_now, px_then]) and oi_then > 0 and px_then > 0:
+                    oi_snap[sym] = ((oi_now - oi_then) / oi_then) * 100 - ((px_now - px_then) / px_then) * 100
+                    price_chg_snap[sym] = ((px_now - px_then) / px_then) * 100
+                if px_now is not None:
+                    price_snap[sym] = px_now
+                lr = ls_h[sym].at(dt_phase1) if sym in ls_h else None
+                if lr is not None:
+                    ls_snap[sym] = lr
+                if sym in taker_h and taker_h[sym] is not None:
+                    tr = taker_h[sym].at(dt_phase1, window_ms=3600_000)
+                    if tr is not None:
+                        taker_snap[sym] = tr
+
+            # Phase 1: Score tokens with watchlist threshold
+            phase1_candidates = []
+            for sym in spot_symbols:
+                score = 0
+                entry_price = price_snap.get(sym)
+                if entry_price is None:
+                    continue
+
+                fr = fund_snap.get(sym)
+                if fr is not None and fr < 0 and sym in fund_h:
+                    cs = _cross_pct(fund_snap.values(), fr)
+                    if cs <= FUNDING_CROSS_SECTIONAL_PCT:
+                        pct = fund_h[sym].percentile(fr, dt_phase1, 90)
+                        if pct is not None and pct <= FUNDING_PERCENTILE:
+                            score += 1
+
+                div = oi_snap.get(sym)
+                if div is not None and len(oi_snap) >= 20:
+                    cs = _cross_pct(oi_snap.values(), div)
+                    pc = price_chg_snap.get(sym, 0)
+                    if cs >= (100 - OI_DIVERGENCE_CROSS_SECTIONAL_PCT) and pc is not None and pc < OI_PRICE_MAX_RISE_PCT:
+                        score += 1
+
+                lr = ls_snap.get(sym)
+                if lr is not None and sym in ls_h and len(ls_snap) >= 20:
+                    cs = _cross_pct(ls_snap.values(), lr)
+                    if cs <= LS_RATIO_CROSS_SECTIONAL_PCT:
+                        pct = ls_h[sym].percentile(lr, dt_phase1, 90)
+                        if pct is not None and pct <= LS_RATIO_PERCENTILE:
+                            score += 1
+
+                tr = taker_snap.get(sym)
+                if tr is not None and sym in taker_h and taker_h[sym] is not None and len(taker_snap) >= 20:
+                    cs = _cross_pct(taker_snap.values(), tr)
+                    if cs <= TAKER_RATIO_CROSS_SECTIONAL_PCT:
+                        pct = taker_h[sym].percentile(tr, dt_phase1, TAKER_RATIO_HISTORY_MS)
+                        if pct is not None and pct <= TAKER_RATIO_PERCENTILE:
+                            score += 1
+
+                # Use watchlist threshold
+                if score >= WATCHLIST_THRESHOLD:
+                    phase1_candidates.append(sym)
+
+            if not phase1_candidates:
+                continue
+
+            # Phase 2: Simulate confirmation after N hours
+            dt_phase2 = dt_phase1 + timedelta(hours=CONFIRMATION_POLL_MINUTES // 60 + 1)
+            confirmed_candidates = []
+            for sym in phase1_candidates:
+                entry_price = price_snap.get(sym)
+                if entry_price is None:
+                    continue
+
+                # Price action check
+                price_at_phase2 = _price_at(ohlcv_h.get(sym, []), dt_phase2)
+                if price_at_phase2 and entry_price > 0:
+                    price_move = ((price_at_phase2 - entry_price) / entry_price) * 100
+                    if price_move >= CONFIRMATION_PRICE_MOVE_PCT:
+                        # Volume check (simplified)
+                        vol_data = _get_volume_at(ohlcv_h.get(sym, []), dt_phase2)
+                        if vol_data:
+                            confirmed_candidates.append(sym)
+                            continue
+
+                # Not confirmed: price action or volume conditions not met,
+                # or data unavailable at confirmation time.
+                # Conservative simulation: only confirm when conditions pass.
+
+            if not confirmed_candidates:
+                continue
+
+            # Phase 3: Simulate trades
+            for sym in confirmed_candidates:
+                entry_price = price_snap.get(sym)
+                if entry_price is None:
+                    continue
+
+                w.total_alerts += 1
+                pumped, _ = detect_pump(ohlcv_h.get(sym, []), entry_price, dt_phase1)
+                if pumped:
+                    w.pumps_caught += 1
+
+                future = _after(ohlcv_h.get(sym, []), dt_phase1)
+                if future:
+                    pnl = simulate_trade(entry_price, future, dt_phase1)
+                    w.total_trades += 1
+                    if pnl > 0:
+                        w.winning_trades += 1
+                        w.gross_profit_pct += pnl
+                    else:
+                        w.gross_loss_pct += abs(pnl)
+
+        w.precision = (w.pumps_caught / w.total_alerts * 100) if w.total_alerts else 0
+        w.profit_factor = (w.gross_profit_pct / w.gross_loss_pct) if w.gross_loss_pct > 0 else (
+            999 if w.gross_profit_pct > 0 else 0
+        )
+        results.append(w)
+        print(f"A:{w.total_alerts} P:{w.precision:.0f}% PF:{w.profit_factor:.2f}")
+
+    _save_results(results)
+    return results
+
+
+def _get_volume_at(candles: list[dict], dt: datetime) -> float | None:
+    """Get volume from OHLCV candles closest to dt."""
+    best, best_diff = None, timedelta(hours=12)
+    for c in candles:
+        t = c.get("t")
+        if t is None:
+            continue
+        diff = abs(datetime.utcfromtimestamp(t) - dt)
+        if diff < best_diff:
+            best_diff = diff
+            best = c.get("v", 0)
+    return float(best) if best is not None else None
