@@ -80,3 +80,29 @@ class TestDBPath:
     def test_db_path_is_string(self):
         assert isinstance(config.DB_PATH, str)
         assert config.DB_PATH.endswith("pump.db")
+
+
+class TestSafetyDefaults:
+    def test_confirmed_entry_alerts_disabled(self):
+        assert config.ENABLE_CONFIRMED_ENTRY_ALERTS is False
+
+    def test_paper_only_mode_enabled(self):
+        assert config.ENABLE_PAPER_ONLY_MODE is True
+
+    def test_catalyst_only_entry_disabled(self):
+        assert config.ENABLE_CATALYST_ONLY_ENTRY is False
+
+    def test_market_regime_filter_enabled(self):
+        assert config.ENABLE_MARKET_REGIME_FILTER is True
+
+    def test_atr_risk_model_enabled(self):
+        assert config.ENABLE_ATR_RISK_MODEL is True
+
+    def test_catalyst_only_cannot_produce_confirmed_entry(self):
+        assert config.ENABLE_CATALYST_ONLY_ENTRY is False
+
+    def test_major_catalyst_reduces_but_never_to_zero(self):
+        assert config.CONFIRMATION_MIN_SCORE_WITH_MAJOR_CATALYST >= 1
+
+    def test_paper_only_mode_active_by_default(self):
+        assert config.ENABLE_PAPER_ONLY_MODE is True

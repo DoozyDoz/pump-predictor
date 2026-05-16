@@ -167,7 +167,7 @@ class TestRunPhase2Confirmation:
         # ConfirmationChecker is imported inside run_phase2_confirmation,
         # so we patch at its source module
         monkeypatch.setattr("src.confirmation.ConfirmationChecker",
-                            lambda sm: mock_checker)
+                            lambda sm, catalyst_results=None: mock_checker)
 
         from src.pipeline import run_phase2_confirmation
         results = run_phase2_confirmation()
@@ -185,7 +185,7 @@ class TestRunPhase2Confirmation:
         monkeypatch.setattr("src.pipeline.StageManager",
                             lambda: MagicMock())
         monkeypatch.setattr("src.confirmation.ConfirmationChecker",
-                            lambda sm: mock_checker)
+                            lambda sm, catalyst_results=None: mock_checker)
 
         from src.pipeline import run_phase2_confirmation
         results = run_phase2_confirmation()
@@ -200,11 +200,107 @@ class TestRunPhase2Confirmation:
         monkeypatch.setattr("src.pipeline.StageManager",
                             lambda: MagicMock())
         monkeypatch.setattr("src.confirmation.ConfirmationChecker",
-                            lambda sm: mock_checker)
+                            lambda sm, catalyst_results=None: mock_checker)
 
         from src.pipeline import run_phase2_confirmation
         results = run_phase2_confirmation()
         assert results == []
+
+
+class TestRunPhase2DBCatalystLoading:
+    """Tests for DB catalyst loading and reconstructed CatalystResult flags."""
+
+    def test_db_catalyst_loading_reconstructs_flags(self, monkeypatch, tmp_path):
+        """Watchlist rows with URGENT_CATALYST and negative event types
+        should be reconstructed with correct is_major_catalyst / is_negative_catalyst flags.
+        """
+        import sqlite3
+        from contextlib import contextmanager
+        import src.db as db_module
+        import src.stages as stages_module
+
+        temp_db = str(tmp_path / "test_pipeline.db")
+        conn = sqlite3.connect(temp_db)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db_module.SCHEMA)
+
+        # Apply watchlist migrations that init_db would run
+        for col, col_def in [
+            ("catalyst_score", "REAL DEFAULT 0"),
+            ("catalyst_event_type", "TEXT DEFAULT ''"),
+            ("catalyst_title", "TEXT DEFAULT ''"),
+            ("catalyst_source", "TEXT DEFAULT ''"),
+            ("catalyst_published_at", "TEXT DEFAULT ''"),
+            ("final_alpha_score", "REAL DEFAULT 0"),
+            ("priority", "TEXT DEFAULT ''"),
+            ("setup_type", "TEXT DEFAULT ''"),
+            ("is_negative_catalyst", "INTEGER DEFAULT 0"),
+            ("has_blocking_negative_catalyst", "INTEGER DEFAULT 0"),
+            ("negative_catalyst_types", "TEXT DEFAULT '[]'"),
+            ("negative_catalyst_severities", "TEXT DEFAULT '[]'"),
+            ("negative_catalyst_reasons", "TEXT DEFAULT '[]'"),
+            ("catalyst_event_ids", "TEXT DEFAULT '[]'"),
+            ("price_change_1h", "REAL"),
+            ("price_change_4h", "REAL"),
+            ("price_change_24h", "REAL"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE watchlist ADD COLUMN {col} {col_def}")
+            except sqlite3.OperationalError:
+                pass
+
+        # Seed token and watchlist with catalyst columns
+        conn.execute(
+            "INSERT INTO tokens (symbol, exchange, market) VALUES (?, 'B', 'spot')",
+            ("BTCUSDT",),
+        )
+        token_id = conn.execute(
+            "SELECT id FROM tokens WHERE symbol = ?", ("BTCUSDT",)
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO watchlist (token_id, symbol, score, signals_fired, "
+            "catalyst_score, catalyst_event_type, priority, "
+            "is_negative_catalyst, has_blocking_negative_catalyst, expired) "
+            "VALUES (?, ?, 2, 'funding_extreme', 0.95, 'exploit_or_hack', 'URGENT_CATALYST', 1, 1, FALSE)",
+            (token_id, "BTCUSDT"),
+        )
+        wl_id = conn.execute(
+            "SELECT id FROM watchlist WHERE symbol = ?", ("BTCUSDT",)
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO stage_progression (watchlist_id, token_id, stage) VALUES (?, ?, 'watchlist')",
+            (wl_id, token_id),
+        )
+        conn.commit()
+
+        @contextmanager
+        def mock_db_session():
+            try:
+                yield conn
+            finally:
+                pass
+
+        monkeypatch.setattr(db_module, "db_session", mock_db_session)
+        monkeypatch.setattr(stages_module, "db_session", mock_db_session)
+
+        captured = {}
+
+        def mock_checker(stage_mgr, catalyst_results=None):
+            captured["catalyst_results"] = catalyst_results
+            mock_instance = MagicMock()
+            mock_instance.run_confirmation.return_value = []
+            return mock_instance
+
+        monkeypatch.setattr("src.confirmation.ConfirmationChecker", mock_checker)
+
+        from src.pipeline import run_phase2_confirmation
+        run_phase2_confirmation()
+
+        assert "catalyst_results" in captured
+        cr = captured["catalyst_results"]["BTCUSDT"]
+        assert cr.is_major_catalyst is True
+        assert cr.is_negative_catalyst is True
+        assert abs(cr.score - 0.95) < 0.001
 
 
 class TestRunPhase3Entry:
@@ -355,3 +451,61 @@ class TestComputeSignals:
         from src.pipeline import _compute_signals
         result = _compute_signals(["BTCUSDT"])
         assert result is None
+
+
+class TestGetPriceChanges:
+    """Tests for _get_price_changes zero-division guard."""
+
+    def test_zero_close_returns_none_not_crash(self, monkeypatch):
+        """Zero close price should return None for that window, not raise."""
+        monkeypatch.setattr(
+            "src.binance.get_klines",
+            lambda sym, interval, limit, market: [
+                {"c": 100.0}, {"c": 0.0}, {"c": 50.0}
+            ],
+        )
+        from src.pipeline import _get_price_changes
+        result = _get_price_changes("BTCUSDT")
+        assert result["1h"] is None
+        assert result["4h"] is None
+        assert result["24h"] is None
+
+    def test_normal_close_returns_values(self, monkeypatch):
+        """Normal close prices should return computed percentages."""
+        # Build 25 candles with close = 100, then 101 (1% change)
+        candles = [{"c": 100.0} for _ in range(24)] + [{"c": 101.0}]
+        monkeypatch.setattr(
+            "src.binance.get_klines",
+            lambda sym, interval, limit, market: candles,
+        )
+        from src.pipeline import _get_price_changes
+        result = _get_price_changes("BTCUSDT")
+        assert result["1h"] == 1.0
+        assert result["4h"] == 1.0
+        assert result["24h"] == 1.0
+
+    def test_missing_candles_returns_none(self, monkeypatch):
+        """Insufficient candles should return all None."""
+        monkeypatch.setattr(
+            "src.binance.get_klines",
+            lambda sym, interval, limit, market: [{"c": 100.0}],
+        )
+        from src.pipeline import _get_price_changes
+        result = _get_price_changes("BTCUSDT")
+        assert result["1h"] is None
+        assert result["4h"] is None
+        assert result["24h"] is None
+
+    def test_api_exception_returns_none(self, monkeypatch):
+        """API exception should return all None."""
+        def _raise(*args, **kwargs):
+            raise Exception("API error")
+        monkeypatch.setattr(
+            "src.binance.get_klines",
+            _raise,
+        )
+        from src.pipeline import _get_price_changes
+        result = _get_price_changes("BTCUSDT")
+        assert result["1h"] is None
+        assert result["4h"] is None
+        assert result["24h"] is None

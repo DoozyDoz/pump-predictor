@@ -4,7 +4,9 @@ Supports staged workflow (watchlist → confirmation → entry) and legacy
 immediate-alert mode controlled by LEGACY_IMMEDIATE_ALERTS config flag.
 """
 
-import csv, json
+import csv
+import json
+import os
 from datetime import datetime
 from src.config import ALERT_THRESHOLD, POSITION_SIZE_PCT, LEGACY_IMMEDIATE_ALERTS
 from src.db import db_session, init_db
@@ -23,12 +25,14 @@ from src.binance import (
 from src.qualitative import (
     QualitativeTag, TokenQualitativeProfile,
     check_defillama_metrics, qualitative_override,
+    profile_to_catalyst_events,
 )
 from src.watchlist import generate_watchlist
 from src.stages import StageManager
-from src.regime import detect_regime, is_suppressed, MarketRegime
+from src.regime import detect_regime, is_suppressed
 from src.risk import compute_atr, position_size as risk_position_size
 from src.notify import TelegramNotifier
+from src.catalysts import CatalystScorer, fetch_catalyst_data, CatalystResult
 
 # Token → CoinGecko ID mapping (build from API, cache locally)
 import os as _os
@@ -245,16 +249,36 @@ def run_phase1_watchlist(symbols: list[str] | None = None,
         print("Regime UNFAVORABLE: watchlist generation suppressed")
         return []
 
-    # Generate watchlist
+    # Catalyst scoring
+    catalyst_results: dict[str, CatalystResult] = {}
+    for sym in symbols:
+        events = fetch_catalyst_data(sym, all_tickers, mapping)
+        profile = qualitative_profiles.get(sym)
+        if profile:
+            events.extend(profile_to_catalyst_events(profile, all_tickers))
+        price_changes = _get_price_changes(sym)
+        result = CatalystScorer().aggregate(sym, events, price_changes)
+        catalyst_results[sym] = result
+
+    # Generate watchlist (pass price changes through)
     candidates = generate_watchlist(
         funding_signals, oi_signals, ls_signals, taker_signals, book_signals,
-        qualitative_profiles, regime,
+        qualitative_profiles, regime, catalyst_results=catalyst_results,
+        price_changes={sym: _get_price_changes(sym) for sym in symbols},
     )
 
     if candidates:
         print(f"Watchlist: {len(candidates)} candidates added")
-        msg = f"<b>Watchlist updated</b> — {len(candidates)} candidate(s) for confirmation."
-        _send_telegram_stage(msg, stage="watchlist")
+        # Use catalyst formatter when any candidate has catalyst priority
+        if any(c.get("priority") == "URGENT_CATALYST" for c in candidates):
+            notifier = TelegramNotifier(
+                os.getenv("TELEGRAM_BOT_TOKEN", ""), os.getenv("TELEGRAM_CHAT_ID", "")
+            )
+            msg = notifier.format_catalyst_watchlist(candidates)
+            _send_telegram_stage(msg, stage="watchlist")
+        else:
+            msg = f"<b>Watchlist updated</b> — {len(candidates)} candidate(s) for confirmation."
+            _send_telegram_stage(msg, stage="watchlist")
     else:
         print("No watchlist candidates today.")
         _send_telegram_stage("<b>Watchlist</b> — No candidates today.", stage="watchlist")
@@ -265,9 +289,37 @@ def run_phase1_watchlist(symbols: list[str] | None = None,
 def run_phase2_confirmation() -> list[dict]:
     """Phase 2: Check watchlist candidates for confirmation (intraday polling)."""
     from src.confirmation import ConfirmationChecker
+    from src.db import db_session
 
     stage_mgr = StageManager()
-    checker = ConfirmationChecker(stage_mgr)
+
+    # Load catalyst results for active watchlist symbols from DB
+    candidates = stage_mgr.get_watchlist_candidates()
+    symbols = [c["symbol"] for c in candidates]
+    catalyst_results: dict[str, CatalystResult] = {}
+    if symbols:
+        with db_session() as conn:
+            rows = conn.execute(
+                """SELECT symbol, catalyst_score, catalyst_event_type, priority,
+                          is_negative_catalyst, has_blocking_negative_catalyst
+                   FROM watchlist WHERE symbol IN ({}) AND expired = FALSE
+                   ORDER BY added_ts DESC""".format(
+                    ",".join("?" * len(symbols))
+                ),
+                symbols,
+            ).fetchall()
+            for row in rows:
+                sym = row["symbol"]
+                # Rebuild a lightweight CatalystResult from persisted fields
+                catalyst_results[sym] = CatalystResult(
+                    symbol=sym,
+                    score=row["catalyst_score"] or 0.0,
+                    is_major_catalyst=(row["priority"] == "URGENT_CATALYST"),
+                    is_negative_catalyst=bool(row["is_negative_catalyst"]),
+                    has_blocking_negative_catalyst=bool(row["has_blocking_negative_catalyst"]),
+                )
+
+    checker = ConfirmationChecker(stage_mgr, catalyst_results=catalyst_results)
     results = checker.run_confirmation()
 
     if not results:
@@ -314,19 +366,62 @@ def run_phase3_entry(confirmed_entries: list[dict] | None = None,
             "position_size_usd": f"{pos_size:.2f}",
             "score": e.get("score", 0),
             "fired_signals": e.get("signals_fired", ""),
+            "catalyst_score": e.get("catalyst_score", 0.0),
+            "catalyst_event_type": e.get("catalyst_event_type", ""),
+            "catalyst_title": e.get("catalyst_title", ""),
         })
 
     # Send entry alerts
-    msg_lines = [f"<b>ENTRY SIGNALS</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", ""]
-    for s in entry_signals:
-        sym = s["symbol"].replace("USDT", "")
-        msg_lines.append(f"<b>BUY ${sym}</b>")
-        msg_lines.append(f"  Size: ${s['position_size_usd']} | ATR: {s['atr_pct']}")
-        msg_lines.append("")
-    _send_telegram_stage("\n".join(msg_lines), stage="entry")
+    has_catalyst = any(s.get("catalyst_score", 0) >= 0.75 for s in entry_signals)
+    if has_catalyst:
+        notifier = TelegramNotifier(
+            os.getenv("TELEGRAM_BOT_TOKEN", ""), os.getenv("TELEGRAM_CHAT_ID", "")
+        )
+        msg = notifier.format_catalyst_entry(entry_signals, portfolio_usd)
+        _send_telegram_stage(msg, stage="entry")
+    else:
+        msg_lines = [f"<b>ENTRY SIGNALS</b> — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", ""]
+        for s in entry_signals:
+            sym = s["symbol"].replace("USDT", "")
+            msg_lines.append(f"<b>BUY ${sym}</b>")
+            msg_lines.append(f"  Size: ${s['position_size_usd']} | ATR: {s['atr_pct']}")
+            msg_lines.append("")
+        _send_telegram_stage("\n".join(msg_lines), stage="entry")
 
     print(f"Entry signals: {len(entry_signals)} confirmed trades")
     return entry_signals
+
+
+def _get_price_changes(symbol: str) -> dict[str, float | None]:
+    """Fetch 1h/4h/24h percent change from close prices.
+    Returns None for a window if denominator is zero or data is missing.
+    """
+    import logging
+    from src.binance import get_klines
+    try:
+        candles = get_klines(symbol, interval="1h", limit=48, market="spot")
+    except Exception:
+        return {"1h": None, "4h": None, "24h": None}
+    if not candles or len(candles) < 24:
+        return {"1h": None, "4h": None, "24h": None}
+    closes = [c["c"] for c in candles if c.get("c") is not None]
+    if len(closes) < 24:
+        return {"1h": None, "4h": None, "24h": None}
+    current = closes[-1]
+
+    def _safe_pct(current_val, previous_val, interval: str):
+        if previous_val is None or previous_val == 0:
+            logging.warning(
+                "Zero or missing close for %s %s window (prev=%s)",
+                symbol, interval, previous_val,
+            )
+            return None
+        return ((current_val - previous_val) / previous_val) * 100
+
+    h1 = _safe_pct(current, closes[-2] if len(closes) >= 2 else None, "1h")
+    h4 = _safe_pct(current, closes[-5] if len(closes) >= 5 else None, "4h")
+    h24 = _safe_pct(current, closes[-25] if len(closes) >= 25 else None, "24h")
+    return {"1h": h1, "4h": h4, "24h": h24}
 
 
 def _send_telegram_stage(msg: str, stage: str = "watchlist"):
@@ -683,22 +778,22 @@ def _print_terminal(alerts, portfolio_usd):
         print(f"  █  Position: ${pos_size:.0f} | Stop: -7% | TP: +15%/+25%/trail")
         print(f"  █  Score: {score} quant + {cat} catalyst = {final} (≥{ALERT_THRESHOLD} triggers)")
         if scan_status == "PARTIAL":
-            print(f"  █  ⚠️  SCAN PARTIAL — do not execute live")
+            print("  █  ⚠️  SCAN PARTIAL — do not execute live")
         print(f"  {'█'*60}")
 
         # Quantitative reasoning
-        print(f"\n  📊  QUANTITATIVE SIGNALS:")
+        print("\n  📊  QUANTITATIVE SIGNALS:")
         if signals:
             fired_list = signals.split('|')
             for sig in fired_list:
                 reason = _quant_reason(sig, a)
                 print(f"      ✓  {reason}")
         else:
-            print(f"      (none fired — alert from qualitative boost only)")
+            print("      (none fired — alert from qualitative boost only)")
 
         # Qualitative reasoning
         if qual_tags:
-            print(f"\n  📰  QUALITATIVE SIGNALS:")
+            print("\n  📰  QUALITATIVE SIGNALS:")
             for tag in qual_tags.split(' | '):
                 tag = tag.strip()
                 if ':' in tag:
@@ -706,7 +801,7 @@ def _print_terminal(alerts, portfolio_usd):
                     print(f"      •  {desc.strip()}")
 
         # Verdict
-        print(f"\n  ⚡  VERDICT: ", end="")
+        print("\n  ⚡  VERDICT: ", end="")
         if 'funding_extreme' in signals and ('volume' in qual_tags.lower() or 'momentum' in qual_tags.lower()):
             print("Funding extreme + volume spike — short squeeze setup. High conviction.")
         elif 'funding_extreme' in signals:
@@ -721,15 +816,15 @@ def _print_terminal(alerts, portfolio_usd):
             print("Multiple signals converging — edge confirmed.")
 
         # Action
-        print(f"\n  🎯  ACTION: Place OCO on Binance Spot")
+        print("\n  🎯  ACTION: Place OCO on Binance Spot")
         print(f"      Symbol:    {sym}USDT")
-        print(f"      Entry:     Market")
+        print("      Entry:     Market")
         print(f"      Size:      ${pos_size:.0f}")
-        print(f"      Stop-loss: -7%")
-        print(f"      TP1:       +15% (50%)")
-        print(f"      TP2:       +25% (30%)")
-        print(f"      Trailing:  -3% from peak (20%)")
-        print(f"      ⚠️  5-min sanity check: scan for hacks, delistings, regulatory news")
+        print("      Stop-loss: -7%")
+        print("      TP1:       +15% (50%)")
+        print("      TP2:       +25% (30%)")
+        print("      Trailing:  -3% from peak (20%)")
+        print("      ⚠️  5-min sanity check: scan for hacks, delistings, regulatory news")
 
     print(f"\n{'─'*70}")
     print(f"  {len(alerts)} alert(s) | Next run: 08:07 UTC | Good luck 🍀")

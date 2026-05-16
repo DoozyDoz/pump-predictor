@@ -18,7 +18,6 @@ from datetime import datetime, timedelta
 from typing import Optional
 from dataclasses import dataclass, field
 import requests
-import json
 
 # ---------------------------------------------------------------------------
 # Catalyst signal types — ranked by historical predictive power
@@ -229,3 +228,49 @@ def qualitative_override(pump_score: int, catalyst_boost: float,
     if catalyst_boost <= -0.5 and pump_score >= threshold:
         return threshold - 1, "negative catalyst suppresses alert"
     return pump_score, ""
+
+
+# Mapping from old QualitativeTag catalyst_type to new CatalystScorer event_type
+_TAG_TO_EVENT_TYPE = {
+    "tvl_surge": "tvl_or_revenue_surge",
+    "protocol_revenue": "tvl_or_revenue_surge",
+    "governance_proposal": "governance_passed_material",
+    "exchange_listing": "major_exchange_listing",
+    "mainnet_upgrade": "mainnet_launch_or_major_upgrade",
+    "partnership": "major_partnership_revenue_relevant",
+    "social_momentum": "social_trending_only",
+    "onchain_anomaly": "tvl_or_revenue_surge",
+    "sector_rotation": "social_trending_only",
+    "capitulation_volume": "social_trending_only",
+    "momentum_volume": "social_trending_only",
+    "trade_count_spike": "social_trending_only",
+    "oversold": "social_trending_only",
+    "token_unlock": "token_unlock_large",
+}
+
+
+def profile_to_catalyst_events(profile: TokenQualitativeProfile, all_tickers: dict) -> list:
+    """Bridge old TokenQualitativeProfile tags into CatalystEvent objects.
+
+    Imports `catalysts` locally to avoid circular imports.
+    """
+    from src.catalysts import CatalystEvent  # local import to avoid cycles
+    events = []
+    for tag in profile.tags:
+        mapped_type = _TAG_TO_EVENT_TYPE.get(tag.catalyst_type, "rumor_unverified")
+        events.append(
+            CatalystEvent(
+                symbol=profile.symbol,
+                source=tag.source,
+                title=tag.description,
+                event_type=mapped_type,
+                published_at=tag.detected_at,
+                event_time=None,
+                credibility_score=tag.confidence,
+                materiality_score=0.5,
+                relevance_score=0.5,
+                novelty_score=0.5,
+                market_attention_score=0.5,
+            )
+        )
+    return events

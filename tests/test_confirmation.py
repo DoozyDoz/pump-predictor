@@ -267,39 +267,57 @@ class TestConfirmationCheckerCheckEntry:
     def test_entry_confirmed_2_of_3_pass(self):
         """2/3 checks passing should confirm entry."""
         checker = ConfirmationChecker(MagicMock())
-        with patch.object(checker, "_check_price_action",
-                          return_value={"confirmed": True, "reason": "pa"}):
-            with patch.object(checker, "_check_order_book",
-                              return_value={"confirmed": True, "reason": "ob"}):
-                with patch.object(checker, "_check_taker_flip",
-                                  return_value={"confirmed": False, "reason": "tf"}):
-                    result = checker._check_entry("BTCUSDT")
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True, "reason": "pa"}):
+                        with patch.object(checker, "_check_order_book",
+                                          return_value={"confirmed": True, "reason": "ob"}):
+                            with patch.object(checker, "_check_taker_flip",
+                                              return_value={"confirmed": False, "reason": "tf"}):
+                                result = checker._check_entry("BTCUSDT")
         assert result["confirmed"] is True
         assert "entry conditions met" in result["reason"]
 
     def test_entry_denied_0_of_3_pass(self):
         """0/3 checks passing should deny entry."""
         checker = ConfirmationChecker(MagicMock())
-        with patch.object(checker, "_check_price_action",
-                          return_value={"confirmed": False}):
-            with patch.object(checker, "_check_order_book",
-                              return_value={"confirmed": False}):
-                with patch.object(checker, "_check_taker_flip",
-                                  return_value={"confirmed": False}):
-                    result = checker._check_entry("BTCUSDT")
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": False}):
+                        with patch.object(checker, "_check_order_book",
+                                          return_value={"confirmed": False}):
+                            with patch.object(checker, "_check_taker_flip",
+                                              return_value={"confirmed": False}):
+                                result = checker._check_entry("BTCUSDT")
         assert result["confirmed"] is False
         assert "not met" in result["reason"]
 
     def test_entry_denied_1_of_3_pass(self):
         """1/3 checks passing should deny entry."""
         checker = ConfirmationChecker(MagicMock())
-        with patch.object(checker, "_check_price_action",
-                          return_value={"confirmed": True}):
-            with patch.object(checker, "_check_order_book",
-                              return_value={"confirmed": False}):
-                with patch.object(checker, "_check_taker_flip",
-                                  return_value={"confirmed": False}):
-                    result = checker._check_entry("BTCUSDT")
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True}):
+                        with patch.object(checker, "_check_order_book",
+                                          return_value={"confirmed": False}):
+                            with patch.object(checker, "_check_taker_flip",
+                                              return_value={"confirmed": False}):
+                                result = checker._check_entry("BTCUSDT")
         assert result["confirmed"] is False
 
 
@@ -309,15 +327,21 @@ class TestConfirmationCheckerCheckSingle:
     def test_all_checks_pass_confirmed(self):
         """All 4 checks passing should return confirmed."""
         checker = ConfirmationChecker(MagicMock())
-        with patch.object(checker, "_check_price_action",
-                          return_value={"confirmed": True, "reason": "pa"}):
-            with patch.object(checker, "_check_volume_confirmation",
-                              return_value={"confirmed": True, "reason": "vc"}):
-                with patch.object(checker, "_check_order_book",
-                                  return_value={"confirmed": True, "reason": "ob"}):
-                    with patch.object(checker, "_check_taker_flip",
-                                      return_value={"confirmed": True, "reason": "tf"}):
-                        result = checker._check_single("BTCUSDT")
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True, "reason": "pa"}):
+                        with patch.object(checker, "_check_volume_confirmation",
+                                          return_value={"confirmed": True, "reason": "vc"}):
+                            with patch.object(checker, "_check_order_book",
+                                              return_value={"confirmed": True, "reason": "ob"}):
+                                with patch.object(checker, "_check_taker_flip",
+                                                  return_value={"confirmed": True, "reason": "tf"}):
+                                    result = checker._check_single("BTCUSDT")
         assert result["confirmed"] is True
         assert result["denied"] is False
         assert result["checks_passed"] == 4
@@ -326,15 +350,21 @@ class TestConfirmationCheckerCheckSingle:
     def test_half_pass_confirmed(self):
         """2/4 checks passing should still confirm (>= half)."""
         checker = ConfirmationChecker(MagicMock())
-        with patch.object(checker, "_check_price_action",
-                          return_value={"confirmed": True, "reason": "pa"}):
-            with patch.object(checker, "_check_volume_confirmation",
-                              return_value={"confirmed": True, "reason": "vc"}):
-                with patch.object(checker, "_check_order_book",
-                                  return_value={"confirmed": False}):
-                    with patch.object(checker, "_check_taker_flip",
-                                      return_value={"confirmed": False}):
-                        result = checker._check_single("BTCUSDT")
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True, "reason": "pa"}):
+                        with patch.object(checker, "_check_volume_confirmation",
+                                          return_value={"confirmed": True, "reason": "vc"}):
+                            with patch.object(checker, "_check_order_book",
+                                              return_value={"confirmed": False}):
+                                with patch.object(checker, "_check_taker_flip",
+                                                  return_value={"confirmed": False}):
+                                    result = checker._check_single("BTCUSDT")
         assert result["confirmed"] is True
         assert result["denied"] is False
         assert result["checks_passed"] == 2
@@ -342,15 +372,21 @@ class TestConfirmationCheckerCheckSingle:
     def test_zero_pass_denied(self):
         """0/4 checks passing should return denied."""
         checker = ConfirmationChecker(MagicMock())
-        with patch.object(checker, "_check_price_action",
-                          return_value={"confirmed": False}):
-            with patch.object(checker, "_check_volume_confirmation",
-                              return_value={"confirmed": False}):
-                with patch.object(checker, "_check_order_book",
-                                  return_value={"confirmed": False}):
-                    with patch.object(checker, "_check_taker_flip",
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
                                       return_value={"confirmed": False}):
-                        result = checker._check_single("BTCUSDT")
+                        with patch.object(checker, "_check_volume_confirmation",
+                                          return_value={"confirmed": False}):
+                            with patch.object(checker, "_check_order_book",
+                                              return_value={"confirmed": False}):
+                                with patch.object(checker, "_check_taker_flip",
+                                                  return_value={"confirmed": False}):
+                                    result = checker._check_single("BTCUSDT")
         assert result["confirmed"] is False
         assert result["denied"] is True
         assert result["checks_passed"] == 0
@@ -358,15 +394,21 @@ class TestConfirmationCheckerCheckSingle:
     def test_some_pass_pending(self):
         """1/4 checks passing should return pending."""
         checker = ConfirmationChecker(MagicMock())
-        with patch.object(checker, "_check_price_action",
-                          return_value={"confirmed": True, "reason": "pa"}):
-            with patch.object(checker, "_check_volume_confirmation",
-                              return_value={"confirmed": False}):
-                with patch.object(checker, "_check_order_book",
-                                  return_value={"confirmed": False}):
-                    with patch.object(checker, "_check_taker_flip",
-                                      return_value={"confirmed": False}):
-                        result = checker._check_single("BTCUSDT")
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True, "reason": "pa"}):
+                        with patch.object(checker, "_check_volume_confirmation",
+                                          return_value={"confirmed": False}):
+                            with patch.object(checker, "_check_order_book",
+                                              return_value={"confirmed": False}):
+                                with patch.object(checker, "_check_taker_flip",
+                                                  return_value={"confirmed": False}):
+                                    result = checker._check_single("BTCUSDT")
         assert result["confirmed"] is False
         assert result["denied"] is False
         assert result["checks_passed"] == 1
@@ -476,3 +518,396 @@ class TestConfirmationCheckerRunConfirmation:
                           }):
             checker.run_confirmation()
         stage_mgr.expire_stale.assert_called_once()
+
+
+class TestConfirmationCheckerSafetyGateBlocking:
+    """Tests proving safety gates block entry and confirmation."""
+
+    def test_entry_blocked_by_negative_catalyst(self):
+        """Denied negative catalyst should block entry even if 2/3 entry checks pass."""
+        checker = ConfirmationChecker(MagicMock())
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": True, "reason": "negative catalyst blocks entry"}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True}):
+                        with patch.object(checker, "_check_order_book",
+                                          return_value={"confirmed": True}):
+                            with patch.object(checker, "_check_taker_flip",
+                                              return_value={"confirmed": False}):
+                                result = checker._check_entry("BTCUSDT")
+        assert result["confirmed"] is False
+        assert "entry blocked: negative catalyst" in result["reason"]
+
+    def test_entry_blocked_by_premove(self):
+        """Denied pre-move should block entry even if 2/3 entry checks pass."""
+        checker = ConfirmationChecker(MagicMock())
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": True, "reason": "already pumped too far"}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True}):
+                        with patch.object(checker, "_check_order_book",
+                                          return_value={"confirmed": True}):
+                            with patch.object(checker, "_check_taker_flip",
+                                              return_value={"confirmed": False}):
+                                result = checker._check_entry("BTCUSDT")
+        assert result["confirmed"] is False
+        assert "entry blocked: already pumped too far" in result["reason"]
+
+    def test_entry_blocked_by_liquidity(self):
+        """Denied liquidity/spread should block entry even if 2/3 entry checks pass."""
+        checker = ConfirmationChecker(MagicMock())
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": True, "reason": "spread too wide (0.60% > 0.5%)"}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True}):
+                        with patch.object(checker, "_check_order_book",
+                                          return_value={"confirmed": True}):
+                            with patch.object(checker, "_check_taker_flip",
+                                              return_value={"confirmed": False}):
+                                result = checker._check_entry("BTCUSDT")
+        assert result["confirmed"] is False
+        assert "entry blocked: spread too wide" in result["reason"]
+
+    def test_single_denied_by_negative_catalyst_before_main_checks(self):
+        """Negative catalyst denial should happen before main checks (checks_total == 0)."""
+        checker = ConfirmationChecker(MagicMock())
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": True, "reason": "negative catalyst blocks entry"}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True}):
+                        with patch.object(checker, "_check_volume_confirmation",
+                                          return_value={"confirmed": True}):
+                            with patch.object(checker, "_check_order_book",
+                                              return_value={"confirmed": True}):
+                                with patch.object(checker, "_check_taker_flip",
+                                                  return_value={"confirmed": True}):
+                                    result = checker._check_single("BTCUSDT")
+        assert result["denied"] is True
+        assert result["checks_total"] == 0
+        assert "negative catalyst" in result["reason"]
+
+    def test_single_denied_by_premove_before_main_checks(self):
+        """Pre-move denial should happen before main checks (checks_total == 0)."""
+        checker = ConfirmationChecker(MagicMock())
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": True, "reason": "already pumped too far"}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True}):
+                        with patch.object(checker, "_check_volume_confirmation",
+                                          return_value={"confirmed": True}):
+                            with patch.object(checker, "_check_order_book",
+                                              return_value={"confirmed": True}):
+                                with patch.object(checker, "_check_taker_flip",
+                                                  return_value={"confirmed": True}):
+                                    result = checker._check_single("BTCUSDT")
+        assert result["denied"] is True
+        assert result["checks_total"] == 0
+        assert "already pumped too far" in result["reason"]
+
+    def test_single_denied_by_liquidity_before_main_checks(self):
+        """Liquidity denial should happen before main checks (checks_total == 0)."""
+        checker = ConfirmationChecker(MagicMock())
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": True, "reason": "spread too wide"}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True}):
+                        with patch.object(checker, "_check_volume_confirmation",
+                                          return_value={"confirmed": True}):
+                            with patch.object(checker, "_check_order_book",
+                                              return_value={"confirmed": True}):
+                                with patch.object(checker, "_check_taker_flip",
+                                                  return_value={"confirmed": True}):
+                                    result = checker._check_single("BTCUSDT")
+        assert result["denied"] is True
+        assert result["checks_total"] == 0
+        assert "spread too wide" in result["reason"]
+
+
+class TestConfirmationCheckerCheckPremove:
+    """Tests for _check_premove actual math and error handling."""
+
+    def test_premove_denied_1h_exceeded(self):
+        """1h move exceeding threshold should deny."""
+        checker = ConfirmationChecker(MagicMock())
+        # Build 48 candles: base=100, last=115 -> 1h=15% > 12%
+        closes = [100.0] * 46 + [100.0, 115.0]
+        candles = [make_candle(c) for c in closes]
+        with patch("src.confirmation.get_klines", return_value=candles):
+            result = checker._check_premove("BTCUSDT")
+        assert result["denied"] is True
+        assert "already pumped too far" in result["reason"]
+        assert "1h:" in result["reason"]
+
+    def test_premove_denied_4h_exceeded(self):
+        """4h move exceeding threshold should deny."""
+        checker = ConfirmationChecker(MagicMock())
+        # closes[-5]=100, current=125 -> 4h=25% > 20%
+        closes = [100.0] * 43 + [100.0] + [125.0] * 4
+        candles = [make_candle(c) for c in closes]
+        with patch("src.confirmation.get_klines", return_value=candles):
+            result = checker._check_premove("BTCUSDT")
+        assert result["denied"] is True
+        assert "already pumped too far" in result["reason"]
+        assert "4h:" in result["reason"]
+
+    def test_premove_denied_24h_exceeded(self):
+        """24h move exceeding threshold should deny."""
+        checker = ConfirmationChecker(MagicMock())
+        # closes[-25]=100, current=140 -> 24h=40% > 35%
+        # indices 0..23 = 100, indices 24..47 = 140
+        closes = [100.0] * 24 + [140.0] * 24
+        candles = [make_candle(c) for c in closes]
+        with patch("src.confirmation.get_klines", return_value=candles):
+            result = checker._check_premove("BTCUSDT")
+        assert result["denied"] is True
+        assert "already pumped too far" in result["reason"]
+        assert "24h:" in result["reason"]
+
+    def test_premove_allowed_within_threshold(self):
+        """All moves within threshold should not deny."""
+        checker = ConfirmationChecker(MagicMock())
+        closes = [100.0] * 23 + [101.0] * 25
+        candles = [make_candle(c) for c in closes]
+        with patch("src.confirmation.get_klines", return_value=candles):
+            result = checker._check_premove("BTCUSDT")
+        assert result["denied"] is False
+        assert result["reason"] == ""
+
+    def test_premove_insufficient_candles(self):
+        """Fewer than 24 candles should return non-blocking with reason."""
+        checker = ConfirmationChecker(MagicMock())
+        candles = [make_candle(100.0) for _ in range(23)]
+        with patch("src.confirmation.get_klines", return_value=candles):
+            result = checker._check_premove("BTCUSDT")
+        assert result["denied"] is False
+        assert "insufficient data" in result["reason"]
+
+    def test_premove_api_exception(self):
+        """API exception should return non-blocking."""
+        checker = ConfirmationChecker(MagicMock())
+        with patch("src.confirmation.get_klines", side_effect=Exception("API error")):
+            result = checker._check_premove("BTCUSDT")
+        assert result["denied"] is False
+        assert "no klines" in result["reason"]
+
+    def test_premove_missing_close_prices(self):
+        """Candles without close prices should return non-blocking."""
+        checker = ConfirmationChecker(MagicMock())
+        candles = [{"v": 1000} for _ in range(48)]
+        with patch("src.confirmation.get_klines", return_value=candles):
+            result = checker._check_premove("BTCUSDT")
+        assert result["denied"] is False
+        assert "no close prices" in result["reason"]
+
+
+class TestConfirmationCheckerCheckLiquidityAndSpread:
+    """Tests for _check_liquidity_and_spread actual math and error handling."""
+
+    def test_liquidity_denied_spread_too_wide(self):
+        """Spread > 0.5% should deny."""
+        checker = ConfirmationChecker(MagicMock())
+        depth = {"bids": [["100", "1"]], "asks": [["100.6", "1"]]}
+        with patch("src.binance.get_order_book", return_value=depth):
+            with patch("src.binance.compute_order_book_imbalance", return_value=0.60):
+                result = checker._check_liquidity_and_spread("BTCUSDT")
+        assert result["denied"] is True
+        assert "spread too wide" in result["reason"]
+        assert "0.60%" in result["reason"]
+
+    def test_liquidity_denied_bid_dominance_too_low(self):
+        """Bid dominance < 0.55 should deny."""
+        checker = ConfirmationChecker(MagicMock())
+        depth = {"bids": [["100", "1"]], "asks": [["100.1", "1"]]}
+        with patch("src.binance.get_order_book", return_value=depth):
+            with patch("src.binance.compute_order_book_imbalance", return_value=0.50):
+                result = checker._check_liquidity_and_spread("BTCUSDT")
+        assert result["denied"] is True
+        assert "bid dominance too low" in result["reason"]
+        assert "0.500" in result["reason"]
+
+    def test_liquidity_allowed_good_conditions(self):
+        """Spread <= 0.5% and bid dominance >= 0.55 should allow."""
+        checker = ConfirmationChecker(MagicMock())
+        depth = {"bids": [["100", "1"]], "asks": [["100.1", "1"]]}
+        with patch("src.binance.get_order_book", return_value=depth):
+            with patch("src.binance.compute_order_book_imbalance", return_value=0.60):
+                result = checker._check_liquidity_and_spread("BTCUSDT")
+        assert result["denied"] is False
+        assert result["reason"] == ""
+
+    def test_liquidity_api_exception_non_blocking(self):
+        """API exception should return non-blocking with error reason."""
+        checker = ConfirmationChecker(MagicMock())
+        with patch("src.binance.get_order_book", side_effect=Exception("network error")):
+            result = checker._check_liquidity_and_spread("BTCUSDT")
+        assert result["denied"] is False
+        assert "liquidity check error" in result["reason"]
+
+
+class TestConfirmationCatalystReduction:
+    """Tests for catalyst-based confirmation requirement reduction."""
+
+    def test_major_catalyst_reduces_confirmation(self):
+        """Major catalyst should reduce required confirmations to 1."""
+        from src.config import CATALYST_MAJOR_SCORE
+        checker = ConfirmationChecker(MagicMock(), catalyst_results={
+            "BTCUSDT": MagicMock(score=CATALYST_MAJOR_SCORE, is_negative_catalyst=False),
+        })
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True, "reason": "pa"}):
+                        with patch.object(checker, "_check_volume_confirmation",
+                                          return_value={"confirmed": False}):
+                            with patch.object(checker, "_check_order_book",
+                                              return_value={"confirmed": False}):
+                                with patch.object(checker, "_check_taker_flip",
+                                                  return_value={"confirmed": False}):
+                                    result = checker._check_single("BTCUSDT")
+        assert result["confirmed"] is True
+        assert result["checks_passed"] == 1
+
+    def test_strong_catalyst_reduces_confirmation(self):
+        """Strong catalyst should reduce required confirmations to 2."""
+        from src.config import CATALYST_STRONG_SCORE
+        checker = ConfirmationChecker(MagicMock(), catalyst_results={
+            "BTCUSDT": MagicMock(score=CATALYST_STRONG_SCORE, is_negative_catalyst=False),
+        })
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True, "reason": "pa"}):
+                        with patch.object(checker, "_check_volume_confirmation",
+                                          return_value={"confirmed": True, "reason": "vc"}):
+                            with patch.object(checker, "_check_order_book",
+                                              return_value={"confirmed": False}):
+                                with patch.object(checker, "_check_taker_flip",
+                                                  return_value={"confirmed": False}):
+                                    result = checker._check_single("BTCUSDT")
+        assert result["confirmed"] is True
+        assert result["checks_passed"] == 2
+
+    def test_default_confirmation_unchanged(self):
+        """No catalyst should require default (2) confirmations."""
+        checker = ConfirmationChecker(MagicMock(), catalyst_results={})
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True, "reason": "pa"}):
+                        with patch.object(checker, "_check_volume_confirmation",
+                                          return_value={"confirmed": True, "reason": "vc"}):
+                            with patch.object(checker, "_check_order_book",
+                                              return_value={"confirmed": False}):
+                                with patch.object(checker, "_check_taker_flip",
+                                                  return_value={"confirmed": False}):
+                                    result = checker._check_single("BTCUSDT")
+        assert result["confirmed"] is True
+        assert result["checks_passed"] == 2
+
+
+class TestConfirmationTwoTierNegative:
+    """Tests for two-tier negative catalyst handling in Phase 2."""
+
+    def test_blocking_negative_blocks_entry(self):
+        """Blocking negative catalyst must deny entry unconditionally."""
+        checker = ConfirmationChecker(MagicMock(), catalyst_results={
+            "BTCUSDT": MagicMock(
+                score=0.95,
+                is_negative_catalyst=True,
+                has_blocking_negative_catalyst=True,
+            ),
+        })
+        result = checker._check_negative_catalyst("BTCUSDT")
+        assert result["denied"] is True
+        assert "blocking negative catalyst" in result["reason"]
+
+    def test_warning_negative_does_not_auto_block_entry(self):
+        """Warning negative catalyst should not auto-deny entry."""
+        checker = ConfirmationChecker(MagicMock(), catalyst_results={
+            "BTCUSDT": MagicMock(
+                score=0.60,
+                is_negative_catalyst=True,
+                has_blocking_negative_catalyst=False,
+            ),
+        })
+        result = checker._check_negative_catalyst("BTCUSDT")
+        assert result["denied"] is False
+
+    def test_warning_negative_increases_confirmation_required(self):
+        """Warning negative should increase required confirmations by 1."""
+        checker = ConfirmationChecker(MagicMock(), catalyst_results={
+            "BTCUSDT": MagicMock(
+                score=0.0,
+                is_negative_catalyst=True,
+                has_blocking_negative_catalyst=False,
+            ),
+        })
+        with patch.object(checker, "_check_negative_catalyst",
+                          return_value={"denied": False}):
+            with patch.object(checker, "_check_premove",
+                              return_value={"denied": False}):
+                with patch.object(checker, "_check_liquidity_and_spread",
+                                  return_value={"denied": False}):
+                    with patch.object(checker, "_check_price_action",
+                                      return_value={"confirmed": True, "reason": "pa"}):
+                        with patch.object(checker, "_check_volume_confirmation",
+                                          return_value={"confirmed": True, "reason": "vc"}):
+                            with patch.object(checker, "_check_order_book",
+                                              return_value={"confirmed": False}):
+                                with patch.object(checker, "_check_taker_flip",
+                                                  return_value={"confirmed": False}):
+                                    result = checker._check_single("BTCUSDT")
+        # Default required = 2, warning negative adds 1 -> 3 needed.
+        # Only 2 checks pass, so should be pending (not confirmed).
+        assert result["confirmed"] is False
+        assert result["denied"] is False
+        assert "partial confirmation" in result["reason"]
+
+    def test_phase2_preserves_negative_state_from_db(self):
+        """Phase 2 must use persisted has_blocking_negative_catalyst, not infer from event_type."""
+        checker = ConfirmationChecker(MagicMock(), catalyst_results={
+            "BTCUSDT": MagicMock(
+                score=0.85,
+                is_negative_catalyst=True,
+                has_blocking_negative_catalyst=True,
+            ),
+        })
+        result = checker._check_single("BTCUSDT")
+        assert result["denied"] is True
+        assert result["checks_total"] == 0

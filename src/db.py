@@ -142,6 +142,22 @@ CREATE TABLE IF NOT EXISTS stage_progression (
     expired_ts TEXT,
     reason TEXT
 );
+
+CREATE TABLE IF NOT EXISTS catalyst_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    source_url TEXT DEFAULT '',
+    title TEXT DEFAULT '',
+    event_type TEXT DEFAULT '',
+    published_at TEXT DEFAULT '',
+    event_time TEXT,
+    final_score REAL DEFAULT 0,
+    metadata_json TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_catalyst_symbol_type_pub ON catalyst_events(symbol, event_type, published_at);
+CREATE INDEX IF NOT EXISTS idx_catalyst_symbol_created ON catalyst_events(symbol, created_at);
 """
 
 
@@ -185,5 +201,45 @@ def init_db():
         ]:
             try:
                 conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {col_def}")
+            except Exception:
+                pass  # column already exists
+
+        # Watchlist catalyst columns (safe migration)
+        for col, col_def in [
+            ("catalyst_score", "REAL DEFAULT 0"),
+            ("catalyst_event_type", "TEXT DEFAULT ''"),
+            ("catalyst_title", "TEXT DEFAULT ''"),
+            ("catalyst_source", "TEXT DEFAULT ''"),
+            ("catalyst_published_at", "TEXT DEFAULT ''"),
+            ("final_alpha_score", "REAL DEFAULT 0"),
+            ("priority", "TEXT DEFAULT ''"),
+            ("setup_type", "TEXT DEFAULT ''"),
+            # Two-tier negative catalyst fields
+            ("is_negative_catalyst", "INTEGER DEFAULT 0"),
+            ("has_blocking_negative_catalyst", "INTEGER DEFAULT 0"),
+            ("negative_catalyst_types", "TEXT DEFAULT '[]'"),
+            ("negative_catalyst_severities", "TEXT DEFAULT '[]'"),
+            ("negative_catalyst_reasons", "TEXT DEFAULT '[]'"),
+            ("catalyst_event_ids", "TEXT DEFAULT '[]'"),
+            # Price reaction fields
+            ("price_change_1h", "REAL"),
+            ("price_change_4h", "REAL"),
+            ("price_change_24h", "REAL"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE watchlist ADD COLUMN {col} {col_def}")
+            except Exception:
+                pass  # column already exists
+
+        # Backtest results catalyst columns (safe migration)
+        for col, col_def in [
+            ("catalyst_only_alerts", "INTEGER DEFAULT 0"),
+            ("combined_alerts", "INTEGER DEFAULT 0"),
+            ("confirmed_after_strong_catalyst", "INTEGER DEFAULT 0"),
+            ("catalyst_precision", "REAL DEFAULT 0"),
+            ("avg_r_by_catalyst_bucket", "TEXT DEFAULT '{}'"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE backtest_results ADD COLUMN {col} {col_def}")
             except Exception:
                 pass  # column already exists

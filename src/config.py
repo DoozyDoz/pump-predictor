@@ -110,3 +110,77 @@ LEGACY_IMMEDIATE_ALERTS = False  # set True to revert to old immediate-alert beh
 # ---------------------------------------------------------------------------
 WATCHLIST_TTL_HOURS = 72
 CONFIRMATION_TTL_HOURS = 24
+
+# ---------------------------------------------------------------------------
+# Catalyst-first alpha configuration
+# ---------------------------------------------------------------------------
+ALPHA_MODE = "CATALYST_FIRST"  # CATALYST_FIRST / BALANCED / TECHNICAL_FIRST
+
+_CATALYST_WEIGHTS = {
+    "CATALYST_FIRST": (0.60, 0.25, 0.15),
+    "BALANCED": (0.50, 0.35, 0.15),
+    "TECHNICAL_FIRST": (0.30, 0.50, 0.20),
+}
+_CW = _CATALYST_WEIGHTS.get(ALPHA_MODE, _CATALYST_WEIGHTS["CATALYST_FIRST"])
+CATALYST_WEIGHT = _CW[0]
+TECHNICAL_SETUP_WEIGHT = _CW[1]
+CONFIRMATION_WEIGHT = _CW[2]
+
+CATALYST_MIN_WATCHLIST_SCORE = 0.60
+CATALYST_STRONG_SCORE = 0.75
+CATALYST_MAJOR_SCORE = 0.90
+
+ALLOW_CATALYST_TO_REDUCE_CONFIRMATION = True
+ENABLE_CATALYST_ONLY_ENTRY = False
+
+CONFIRMATION_MIN_SCORE_WITH_STRONG_CATALYST = 2
+CONFIRMATION_MIN_SCORE_WITH_MAJOR_CATALYST = 1
+
+CATALYST_MAX_NEWS_AGE_HOURS = 24
+CATALYST_STALE_AFTER_HOURS = 6
+CATALYST_MAX_1H_PREMOVE_PCT = 12.0
+CATALYST_MAX_4H_PREMOVE_PCT = 20.0
+CATALYST_MAX_24H_PREMOVE_PCT = 35.0
+
+# ---------------------------------------------------------------------------
+# Negative catalyst severity model (two-tier)
+# ---------------------------------------------------------------------------
+NEGATIVE_CATALYST_SEVERITY = {
+    # Blocking negatives — hard deny confirmed entry
+    "exploit_or_hack": "blocking",
+    "delisting": "blocking",
+    "regulatory_action": "blocking",
+    "chain_halt": "blocking",
+    "bridge_issue": "blocking",
+    # Warning negatives — dampen, require stronger confirmation
+    "token_unlock_large": "warning",
+    "team_resignation": "warning",
+    "governance_rejected": "warning",
+}
+
+BLOCKING_NEGATIVE_EVENT_TYPES = {
+    "exploit_or_hack",
+    "delisting",
+    "regulatory_action",
+    "chain_halt",
+    "bridge_issue",
+}
+
+WARNING_NEGATIVE_EVENT_TYPES = {
+    "token_unlock_large",
+    "team_resignation",
+    "governance_rejected",
+}
+
+# ---------------------------------------------------------------------------
+# Safety defaults
+# ---------------------------------------------------------------------------
+ENABLE_CONFIRMED_ENTRY_ALERTS = False
+ENABLE_PAPER_ONLY_MODE = True
+ENABLE_CATALYST_ONLY_ENTRY = False
+ENABLE_MARKET_REGIME_FILTER = True
+ENABLE_ATR_RISK_MODEL = True
+
+CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY")
+COINMARKETCAL_API_KEY = os.getenv("COINMARKETCAL_API_KEY")
+

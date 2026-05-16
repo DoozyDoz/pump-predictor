@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 from typing import Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
 from bisect import bisect_left
 from collections import defaultdict
@@ -33,6 +33,14 @@ class BacktestWindow:
     total_alerts: int = 0; pumps_caught: int = 0; precision: float = 0.0
     total_trades: int = 0; winning_trades: int = 0
     gross_profit_pct: float = 0.0; gross_loss_pct: float = 0.0; profit_factor: float = 0.0
+    catalyst_only_alerts: int = 0
+    technical_only_alerts: int = 0
+    combined_alerts: int = 0
+    confirmed_after_strong_catalyst: int = 0
+    performance_by_event_type: dict = field(default_factory=dict)
+    performance_by_source: dict = field(default_factory=dict)
+    performance_by_freshness: dict = field(default_factory=dict)
+    performance_by_premove: dict = field(default_factory=dict)
 
 
 class SortedHistory:
@@ -382,19 +390,32 @@ def _after(candles, dt):
 
 
 def _save_results(results):
-    with db_session() as conn:
-        for r in results:
-            conn.execute("""INSERT INTO backtest_results
-                (train_start, train_end, test_start, test_end,
-                 total_alerts, pumps_caught, precision,
-                 total_trades, winning_trades,
-                 gross_profit_pct, gross_loss_pct, profit_factor)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (r.train_start, r.train_end, r.test_start, r.test_end,
-                 r.total_alerts, r.pumps_caught, r.precision,
-                 r.total_trades, r.winning_trades,
-                 r.gross_profit_pct, r.gross_loss_pct, r.profit_factor))
-    print(f"\nResults saved to {DB_PATH}")
+    import sqlite3
+    try:
+        with db_session() as conn:
+            for r in results:
+                conn.execute("""INSERT INTO backtest_results
+                    (train_start, train_end, test_start, test_end,
+                     total_alerts, pumps_caught, precision,
+                     total_trades, winning_trades,
+                     gross_profit_pct, gross_loss_pct, profit_factor,
+                     catalyst_only_alerts, combined_alerts,
+                     confirmed_after_strong_catalyst, catalyst_precision,
+                     avg_r_by_catalyst_bucket)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (r.train_start, r.train_end, r.test_start, r.test_end,
+                     r.total_alerts, r.pumps_caught, r.precision,
+                     r.total_trades, r.winning_trades,
+                     r.gross_profit_pct, r.gross_loss_pct, r.profit_factor,
+                     r.catalyst_only_alerts, r.combined_alerts,
+                     r.confirmed_after_strong_catalyst,
+                     0.0,
+                     '{}'))
+        print(f"\nResults saved to {DB_PATH}")
+    except sqlite3.OperationalError as exc:
+        print(f"\nERROR: Backtest results could not be saved. Schema issue: {exc}")
+        print("Run 'init_db()' to ensure all required columns exist.")
+        raise
 
 
 def print_summary(results):
@@ -428,6 +449,24 @@ def print_summary(results):
     print("=" * 60)
 
 
+def print_catalyst_summary(results):
+    if not results:
+        print("No catalyst data.")
+        return
+    co = sum(r.catalyst_only_alerts for r in results)
+    to = sum(r.technical_only_alerts for r in results)
+    cb = sum(r.combined_alerts for r in results)
+    csc = sum(r.confirmed_after_strong_catalyst for r in results)
+    print("\n" + "-" * 60)
+    print("CATALYST BACKTEST SUMMARY")
+    print("-" * 60)
+    print(f"Catalyst-only alerts:            {co}")
+    print(f"Technical-only alerts:           {to}")
+    print(f"Combined alerts:                 {cb}")
+    print(f"Confirmed after strong catalyst: {csc}")
+    print("-" * 60)
+
+
 def run_staged_backtest(spot_symbols: list[str], max_symbols: int = 0) -> list[BacktestWindow]:
     """
     Backtest that simulates the 3-stage workflow:
@@ -437,6 +476,9 @@ def run_staged_backtest(spot_symbols: list[str], max_symbols: int = 0) -> list[B
 
     Compares precision/profit factor against current immediate-alert approach.
     """
+    from src.db import init_db
+    init_db()
+
     if max_symbols and max_symbols < len(spot_symbols):
         spot_symbols = spot_symbols[:max_symbols]
 

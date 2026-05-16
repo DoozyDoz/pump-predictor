@@ -8,6 +8,13 @@ order book improvement, and taker ratio flip detection.
 from src.config import (
     CONFIRMATION_PRICE_MOVE_PCT,
     CONFIRMATION_VOLUME_SURGE_PCT,
+    CONFIRMATION_MIN_SCORE_WITH_STRONG_CATALYST,
+    CONFIRMATION_MIN_SCORE_WITH_MAJOR_CATALYST,
+    CATALYST_STRONG_SCORE,
+    CATALYST_MAJOR_SCORE,
+    CATALYST_MAX_1H_PREMOVE_PCT,
+    CATALYST_MAX_4H_PREMOVE_PCT,
+    CATALYST_MAX_24H_PREMOVE_PCT,
 )
 from src.stages import StageManager
 from src.binance import get_klines, get_taker_ratio_history
@@ -16,8 +23,9 @@ from src.binance import get_klines, get_taker_ratio_history
 class ConfirmationChecker:
     """Checks watchlist candidates for confirmation signals."""
 
-    def __init__(self, stage_mgr: StageManager):
+    def __init__(self, stage_mgr: StageManager, catalyst_results: dict | None = None):
         self.stage_mgr = stage_mgr
+        self.catalyst_results = catalyst_results or {}
 
     def run_confirmation(self, symbols: list[str] | None = None) -> list[dict]:
         """Run confirmation checks on all active watchlist candidates.
@@ -61,6 +69,54 @@ class ConfirmationChecker:
         total_checks = 0
         reasons = []
 
+        # Dynamic confirmation requirement based on catalyst strength
+        catalyst_result = self.catalyst_results.get(symbol)
+        catalyst_score = catalyst_result.score if catalyst_result else 0.0
+        default_required = max(1, 4 // 2)  # existing default = 2
+        required = default_required
+        if catalyst_score >= CATALYST_MAJOR_SCORE:
+            required = CONFIRMATION_MIN_SCORE_WITH_MAJOR_CATALYST
+        elif catalyst_score >= CATALYST_STRONG_SCORE:
+            required = CONFIRMATION_MIN_SCORE_WITH_STRONG_CATALYST
+
+        # Warning negative catalysts increase confirmation burden
+        if catalyst_result and catalyst_result.is_negative_catalyst and not catalyst_result.has_blocking_negative_catalyst:
+            required += 1
+
+        # Safety gates
+        neg = self._check_negative_catalyst(symbol)
+        if neg["denied"]:
+            return {
+                "symbol": symbol,
+                "confirmed": False,
+                "denied": True,
+                "reason": neg["reason"],
+                "checks_passed": 0,
+                "checks_total": total_checks,
+            }
+
+        pm = self._check_premove(symbol)
+        if pm["denied"]:
+            return {
+                "symbol": symbol,
+                "confirmed": False,
+                "denied": True,
+                "reason": pm["reason"],
+                "checks_passed": 0,
+                "checks_total": total_checks,
+            }
+
+        liq = self._check_liquidity_and_spread(symbol)
+        if liq["denied"]:
+            return {
+                "symbol": symbol,
+                "confirmed": False,
+                "denied": True,
+                "reason": liq["reason"],
+                "checks_passed": 0,
+                "checks_total": total_checks,
+            }
+
         # Check 1: Price action
         pa = self._check_price_action(symbol)
         total_checks += 1
@@ -89,8 +145,8 @@ class ConfirmationChecker:
             confirmed_count += 1
             reasons.append(tf.get("reason", "taker flip detected"))
 
-        # Decision: at least 2 of 4 checks must pass for confirmation
-        min_confirmations = max(1, total_checks // 2)
+        # Decision
+        min_confirmations = required
         if confirmed_count >= min_confirmations:
             return {
                 "symbol": symbol,
@@ -118,6 +174,77 @@ class ConfirmationChecker:
                 "checks_passed": confirmed_count,
                 "checks_total": total_checks,
             }
+
+    def _check_negative_catalyst(self, symbol: str) -> dict:
+        catalyst_result = self.catalyst_results.get(symbol)
+        if catalyst_result and catalyst_result.has_blocking_negative_catalyst:
+            return {
+                "symbol": symbol,
+                "confirmed": False,
+                "denied": True,
+                "reason": "blocking negative catalyst blocks entry",
+            }
+        # Warning-level negatives do not auto-deny in Phase 2,
+        # but increase confirmation burden elsewhere.
+        return {"symbol": symbol, "confirmed": False, "denied": False, "reason": ""}
+
+    def _check_premove(self, symbol: str) -> dict:
+        try:
+            candles = get_klines(symbol, interval="1h", limit=48, market="spot")
+        except Exception:
+            return {"symbol": symbol, "confirmed": False, "denied": False, "reason": "no klines for pre-move"}
+
+        if not candles or len(candles) < 24:
+            return {"symbol": symbol, "confirmed": False, "denied": False, "reason": "insufficient data for pre-move"}
+
+        closes = [c["c"] for c in candles if c.get("c")]
+        if not closes or len(closes) < 24:
+            return {"symbol": symbol, "confirmed": False, "denied": False, "reason": "no close prices for pre-move"}
+
+        # Compute 1h, 4h, 24h pct changes using absolute values
+        current = closes[-1]
+        h1 = abs((current - closes[-2]) / closes[-2] * 100) if len(closes) >= 2 else 0
+        h4 = abs((current - closes[-5]) / closes[-5] * 100) if len(closes) >= 5 else 0
+        h24 = abs((current - closes[-25]) / closes[-25] * 100) if len(closes) >= 25 else 0
+
+        if h1 >= CATALYST_MAX_1H_PREMOVE_PCT or h4 >= CATALYST_MAX_4H_PREMOVE_PCT or h24 >= CATALYST_MAX_24H_PREMOVE_PCT:
+            return {
+                "symbol": symbol,
+                "confirmed": False,
+                "denied": True,
+                "reason": f"already pumped too far (1h:{h1:.1f}% 4h:{h4:.1f}% 24h:{h24:.1f}%)",
+            }
+        return {"symbol": symbol, "confirmed": False, "denied": False, "reason": ""}
+
+    def _check_liquidity_and_spread(self, symbol: str) -> dict:
+        try:
+            from src.binance import get_order_book, compute_order_book_imbalance
+            depth = get_order_book(symbol, limit=100)
+            dom = compute_order_book_imbalance(depth, 10)
+            if depth and depth.get("bids") and depth.get("asks"):
+                best_bid = float(depth["bids"][0][0])
+                best_ask = float(depth["asks"][0][0])
+                spread = (best_ask - best_bid) / ((best_ask + best_bid) / 2) * 100 if best_bid > 0 else 0
+            else:
+                spread = 0
+        except Exception as e:
+            return {"symbol": symbol, "confirmed": False, "denied": False, "reason": f"liquidity check error: {e}"}
+
+        if spread > 0.5:
+            return {
+                "symbol": symbol,
+                "confirmed": False,
+                "denied": True,
+                "reason": f"spread too wide ({spread:.2f}% > 0.5%)",
+            }
+        if dom < 0.55:
+            return {
+                "symbol": symbol,
+                "confirmed": False,
+                "denied": True,
+                "reason": f"bid dominance too low ({dom:.3f} < 0.55)",
+            }
+        return {"symbol": symbol, "confirmed": False, "denied": False, "reason": ""}
 
     def _check_price_action(self, symbol: str) -> dict:
         """Check if price is bouncing from recent low."""
@@ -258,7 +385,33 @@ class ConfirmationChecker:
     def _check_entry(self, symbol: str) -> dict:
         """After confirmation, check if conditions are right for entry.
         Combines price action + order book + taker flip.
+        Also requires liquidity/spread OK, no negative catalyst, and pre-move OK.
         """
+        # Safety gates
+        neg = self._check_negative_catalyst(symbol)
+        if neg["denied"]:
+            return {
+                "confirmed": False,
+                "symbol": symbol,
+                "reason": "entry blocked: negative catalyst",
+            }
+
+        pm = self._check_premove(symbol)
+        if pm["denied"]:
+            return {
+                "confirmed": False,
+                "symbol": symbol,
+                "reason": "entry blocked: already pumped too far",
+            }
+
+        liq = self._check_liquidity_and_spread(symbol)
+        if liq["denied"]:
+            return {
+                "confirmed": False,
+                "symbol": symbol,
+                "reason": f"entry blocked: {liq['reason']}",
+            }
+
         pa = self._check_price_action(symbol)
         ob = self._check_order_book(symbol)
         tf = self._check_taker_flip(symbol)
