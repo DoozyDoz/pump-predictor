@@ -3,7 +3,7 @@
 import argparse
 from datetime import datetime
 from src.db import init_db
-from src.pipeline import run_daily, run_phase2_confirmation
+from src.pipeline import run_daily, run_phase1_watchlist, run_phase2_confirmation, run_phase3_entry
 from src.backtest import run_backtest, print_summary, run_staged_backtest
 from src.universe import refresh_universe
 
@@ -22,7 +22,6 @@ def cmd_universe(_args):
 
 def cmd_daily(args):
     if args.staged:
-        from src.pipeline import run_phase1_watchlist
         run_phase1_watchlist(portfolio_usd=args.portfolio)
     elif args.legacy:
         run_daily(portfolio_usd=args.portfolio, legacy=True)
@@ -51,6 +50,29 @@ def cmd_backtest(args):
         print(f"Running backtest on {len(symbols)} symbols...")
         results = run_backtest(symbols)
     print_summary(results)
+
+
+def cmd_backtest_confirmation(args):
+    """Run staged backtest (watchlist -> confirmation -> entry) explicitly."""
+    from src.db import db_session
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT symbol FROM tokens WHERE in_universe = TRUE AND market = 'spot' "
+            "AND exchange = 'B' ORDER BY id"
+        ).fetchall()
+    symbols = [r[0] for r in rows] if rows else refresh_universe()
+    if args.limit:
+        symbols = symbols[:args.limit]
+    print(f"Running staged confirmation backtest on {len(symbols)} symbols...")
+    results = run_staged_backtest(symbols)
+    print_summary(results)
+
+
+def cmd_monitor(_args):
+    """Intraday monitor: load active watchlist, evaluate confirmations, send alerts."""
+    print("Starting intraday monitor...")
+    run_phase2_confirmation()
+    run_phase3_entry()
 
 
 def cmd_import_coinglass(args):
@@ -141,11 +163,16 @@ def main():
     p.add_argument("--staged", action="store_true", help="Run staged workflow (Phase 1 only)")
     p.add_argument("--legacy", action="store_true", help="Use legacy immediate-alert mode")
 
-    p = sub.add_parser("confirm", help="Run confirmation phase on watchlist candidates")
+    sub.add_parser("confirm", help="Run confirmation phase on watchlist candidates")
+
+    sub.add_parser("monitor", help="Intraday monitor: evaluate confirmations and send alerts")
 
     p = sub.add_parser("backtest", help="Run funding-rate backtest")
     p.add_argument("--limit", type=int, default=0, help="Limit to N tokens (faster test)")
     p.add_argument("--staged", action="store_true", help="Run staged backtest instead of immediate-alert")
+
+    p = sub.add_parser("backtest-confirmation", help="Run staged confirmation backtest explicitly")
+    p.add_argument("--limit", type=int, default=0, help="Limit to N tokens")
 
     p = sub.add_parser("import-coinglass", help="Import CoinGlass history into signal_snapshots")
     p.add_argument("--limit", type=int, default=0, help="Limit to N tokens")
@@ -162,8 +189,12 @@ def main():
         cmd_daily(args)
     elif args.command == "confirm":
         cmd_confirm(args)
+    elif args.command == "monitor":
+        cmd_monitor(args)
     elif args.command == "backtest":
         cmd_backtest(args)
+    elif args.command == "backtest-confirmation":
+        cmd_backtest_confirmation(args)
     elif args.command == "import-coinglass":
         cmd_import_coinglass(args)
     else:
