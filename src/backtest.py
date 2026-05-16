@@ -585,7 +585,10 @@ def run_staged_backtest(spot_symbols: list[str], max_symbols: int = 0) -> list[B
                 continue
 
             # Phase 2: Simulate confirmation after N hours
-            dt_phase2 = dt_phase1 + timedelta(hours=CONFIRMATION_POLL_MINUTES // 60 + 1)
+            # Use at least 4h delay so _price_at resolves to a different candle
+            # than dt_phase1 (backtest uses 4h klines)
+            conf_delay_hours = max(CONFIRMATION_POLL_MINUTES // 60 + 1, 4)
+            dt_phase2 = dt_phase1 + timedelta(hours=conf_delay_hours)
             confirmed_candidates = []
             for sym in phase1_candidates:
                 entry_price = price_snap.get(sym)
