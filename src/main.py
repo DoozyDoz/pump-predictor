@@ -22,7 +22,8 @@ def cmd_universe(_args):
 
 def cmd_daily(args):
     if args.staged:
-        run_phase1_watchlist(portfolio_usd=args.portfolio)
+        result = run_phase1_watchlist(portfolio_usd=args.portfolio)
+        print(f"Phase 1: {result.status} — {len(result.alerts)} alert(s)")
     elif args.legacy:
         run_daily(portfolio_usd=args.portfolio, legacy=True)
     else:
@@ -30,7 +31,8 @@ def cmd_daily(args):
 
 
 def cmd_confirm(_args):
-    run_phase2_confirmation()
+    result = run_phase2_confirmation()
+    print(f"Phase 2: {result.status} — {len(result.alerts)} alert(s)")
 
 
 def cmd_backtest(args):
@@ -71,8 +73,11 @@ def cmd_backtest_confirmation(args):
 def cmd_monitor(_args):
     """Intraday monitor: load active watchlist, evaluate confirmations, send alerts."""
     print("Starting intraday monitor...")
-    run_phase2_confirmation()
-    run_phase3_entry()
+    result = run_phase2_confirmation()
+    if result:
+        run_phase3_entry(result.alerts)
+    else:
+        print(f"Monitor: {result.status} — {result.detail}")
 
 
 def cmd_import_coinglass(args):

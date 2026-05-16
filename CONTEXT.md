@@ -35,6 +35,10 @@ _Avoid_: Whale buying, rich-wallet inflow
 A binary count (0–5) of how many Phase 1 signals have fired. A score of ≥2 produces a Pump Alert. Signals: funding-rate extreme (Binance), OI/price divergence (Binance), long/short ratio extreme (Binance), taker buy/sell ratio extreme (Binance), order book bid dominance (Binance).
 _Avoid_: Confidence, rating, probability
 
+**Scan Report**:
+The result of a single pipeline run, containing either Pump Alerts or a status explaining why none were found (e.g., no setups, suppressed, API failure). Every scan produces a report.
+_Avoid_: Scan result, output, batch result
+
 **OI/Price Divergence**:
 Open Interest % change minus price % change over a 7-day lookback. Rising OI with flat or falling price signals accumulation. Fires when divergence ranks in the top 5% of the universe (cross-sectional) AND the token's price has not already risen ≥5%.
 _Avoid_: OI delta, OI/price spread
@@ -52,6 +56,7 @@ _Avoid_: Overleveraged, crowded long, basis anomaly
 - Each **Pump** is predicted by one or more **Pump Signals** converging within the **Lookahead Window**
 - **Quantitative Signals** feed directly into the **Pump Score**; **Qualitative Signals** are tagged but do not enter the score in Phase 1
 - A token must be in the **Asset Universe** to be scored
+- Every scan produces a **Scan Report**, which either contains Pump Alerts or explains why none were found (no setups, suppressed, API failure, etc.)
 
 ## Approach (phased)
 

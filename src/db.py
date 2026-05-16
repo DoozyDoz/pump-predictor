@@ -158,6 +158,17 @@ CREATE TABLE IF NOT EXISTS catalyst_events (
 );
 CREATE INDEX IF NOT EXISTS idx_catalyst_symbol_type_pub ON catalyst_events(symbol, event_type, published_at);
 CREATE INDEX IF NOT EXISTS idx_catalyst_symbol_created ON catalyst_events(symbol, created_at);
+
+CREATE TABLE IF NOT EXISTS scan_status (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phase TEXT NOT NULL,  -- 'phase1' or 'phase2'
+    status TEXT NOT NULL,  -- 'alerts_found', 'no_setups', 'suppressed', 'api_failure', 'no_watchlist', 'no_confirmations', 'error'
+    detail TEXT DEFAULT '',
+    candidate_symbols TEXT DEFAULT '[]',
+    alert_count INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_scan_status_phase_ts ON scan_status(phase, created_at DESC);
 """
 
 
@@ -243,3 +254,36 @@ def init_db():
                 conn.execute(f"ALTER TABLE backtest_results ADD COLUMN {col} {col_def}")
             except Exception:
                 pass  # column already exists
+
+
+def get_last_scan_status(phase: str) -> dict | None:
+    """Return the most recent scan_status row for a given phase, or None."""
+    with db_session() as conn:
+        row = conn.execute(
+            "SELECT status, detail, candidate_symbols, alert_count FROM scan_status "
+            "WHERE phase = ? ORDER BY created_at DESC LIMIT 1",
+            (phase,),
+        ).fetchone()
+        if row:
+            return {
+                "status": row["status"],
+                "detail": row["detail"],
+                "candidate_symbols": json.loads(row["candidate_symbols"]) if row["candidate_symbols"] else [],
+                "alert_count": row["alert_count"],
+            }
+        return None
+
+
+def write_scan_status(phase: str, status: str, detail: str = "",
+                      candidate_symbols: list[str] | None = None,
+                      alert_count: int = 0):
+    """Persist a scan status row."""
+    import json
+    with db_session() as conn:
+        conn.execute(
+            "INSERT INTO scan_status (phase, status, detail, candidate_symbols, alert_count) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (phase, status, detail,
+             json.dumps(candidate_symbols or []),
+             alert_count),
+        )

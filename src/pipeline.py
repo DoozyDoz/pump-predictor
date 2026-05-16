@@ -33,6 +33,7 @@ from src.regime import detect_regime, is_suppressed
 from src.risk import compute_atr, position_size as risk_position_size
 from src.notify import TelegramNotifier
 from src.catalysts import CatalystScorer, fetch_catalyst_data, CatalystResult
+from src.scan_result import ScanResult
 
 # Token → CoinGecko ID mapping (build from API, cache locally)
 import os as _os
@@ -158,7 +159,8 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0,
         legacy = LEGACY_IMMEDIATE_ALERTS
 
     if not legacy:
-        return run_phase1_watchlist(symbols, portfolio_usd)
+        result = run_phase1_watchlist(symbols, portfolio_usd)
+        return result.alerts
 
     # ---- Legacy mode: original immediate-alert behavior ----
     init_db()
@@ -209,8 +211,12 @@ def run_daily(symbols: list[str] | None = None, portfolio_usd: float = 1000.0,
 # ---------------------------------------------------------------------------
 
 def run_phase1_watchlist(symbols: list[str] | None = None,
-                         portfolio_usd: float = 1000.0) -> list[dict]:
-    """Phase 1: Generate watchlist from raw signals. No buy alerts sent."""
+                         portfolio_usd: float = 1000.0) -> ScanResult:
+    """Phase 1: Generate watchlist from raw signals. No buy alerts sent.
+
+    Returns a ScanResult with status explaining why no alerts were found
+    when the watchlist is empty or the pipeline hit a failure.
+    """
     init_db()
     run_ts = datetime.utcnow().isoformat()
     mapping = _load_mapping()
@@ -226,13 +232,16 @@ def run_phase1_watchlist(symbols: list[str] | None = None,
     try:
         all_tickers = {t["symbol"]: t for t in get_24h_tickers()}
     except Exception as e:
-        print(f"SCAN FAILED: cannot fetch 24h tickers — {e}")
-        return []
+        detail = f"Binance 24h tickers API timeout: {e}"
+        print(f"SCAN FAILED: {detail}")
+        return ScanResult(status="api_failure", detail=detail, phase="phase1")
 
     # Quantitative signals
     result = _compute_signals(symbols)
     if result is None:
-        return []
+        detail = "Signal computation failed: funding/OI/LS data unavailable"
+        print(f"SCAN FAILED: {detail}")
+        return ScanResult(status="api_failure", detail=detail, phase="phase1")
     (funding_signals, oi_signals, ls_signals, taker_signals, book_signals,
      scan_status, scan_errors, deep_check_syms, all_funding_rates) = result
 
@@ -242,12 +251,12 @@ def run_phase1_watchlist(symbols: list[str] | None = None,
     # Qualitative signals
     qualitative_profiles = _build_qualitative(symbols, sym_names, all_tickers, mapping)
 
-    # Market regime filter
+    # Market regime filter (compute candidates regardless — feedback loop)
     regime = detect_regime()
     print(f"Market regime: {regime.value}")
-    if is_suppressed(regime):
-        print("Regime UNFAVORABLE: watchlist generation suppressed")
-        return []
+    suppressed = is_suppressed(regime)
+    if suppressed:
+        print("Regime UNFAVORABLE: watchlist generation suppressed (computing anyway for reporting)")
 
     # Catalyst scoring
     catalyst_results: dict[str, CatalystResult] = {}
@@ -269,25 +278,31 @@ def run_phase1_watchlist(symbols: list[str] | None = None,
 
     if candidates:
         print(f"Watchlist: {len(candidates)} candidates added")
-        # Use catalyst formatter when any candidate has catalyst priority
-        if any(c.get("priority") == "URGENT_CATALYST" for c in candidates):
-            notifier = TelegramNotifier(
-                os.getenv("TELEGRAM_BOT_TOKEN", ""), os.getenv("TELEGRAM_CHAT_ID", "")
-            )
-            msg = notifier.format_catalyst_watchlist(candidates)
-            _send_telegram_stage(msg, stage="watchlist")
-        else:
-            msg = f"<b>Watchlist updated</b> — {len(candidates)} candidate(s) for confirmation."
-            _send_telegram_stage(msg, stage="watchlist")
     else:
         print("No watchlist candidates today.")
-        _send_telegram_stage("<b>Watchlist</b> — No candidates today.", stage="watchlist")
 
-    return candidates
+    if suppressed and candidates:
+        syms = [c["symbol"].replace("USDT", "") for c in candidates]
+        detail = f"{regime.value} regime"
+        return ScanResult(
+            status="suppressed",
+            alerts=candidates,
+            detail=detail,
+            candidate_symbols=syms,
+            phase="phase1",
+        )
+
+    if not candidates:
+        return ScanResult(status="no_setups", phase="phase1")
+
+    return ScanResult(status="alerts_found", alerts=candidates, phase="phase1")
 
 
-def run_phase2_confirmation() -> list[dict]:
-    """Phase 2: Check watchlist candidates for confirmation (intraday polling)."""
+def run_phase2_confirmation() -> ScanResult:
+    """Phase 2: Check watchlist candidates for confirmation (intraday polling).
+
+    Returns a ScanResult. actionable alerts are confirmed/promoted entries.
+    """
     from src.confirmation import ConfirmationChecker
     from src.db import db_session
 
@@ -296,6 +311,10 @@ def run_phase2_confirmation() -> list[dict]:
     # Load catalyst results for active watchlist symbols from DB
     candidates = stage_mgr.get_watchlist_candidates()
     symbols = [c["symbol"] for c in candidates]
+
+    if not candidates:
+        return ScanResult(status="no_watchlist", phase="phase2")
+
     catalyst_results: dict[str, CatalystResult] = {}
     if symbols:
         with db_session() as conn:
@@ -323,7 +342,7 @@ def run_phase2_confirmation() -> list[dict]:
     results = checker.run_confirmation()
 
     if not results:
-        return []
+        return ScanResult(status="no_confirmations", phase="phase2")
 
     confirmed = [r for r in results if r.get("confirmed")]
     denied = [r for r in results if r.get("denied")]
@@ -336,7 +355,19 @@ def run_phase2_confirmation() -> list[dict]:
     if denied:
         print(f"  {len(denied)} denied/expired")
 
-    return results
+    if confirmed:
+        return ScanResult(
+            status="alerts_found",
+            alerts=confirmed,
+            candidate_symbols=[r["symbol"] for r in results],
+            phase="phase2",
+        )
+
+    return ScanResult(
+        status="no_confirmations",
+        candidate_symbols=[r["symbol"] for r in results],
+        phase="phase2",
+    )
 
 
 def run_phase3_entry(confirmed_entries: list[dict] | None = None,

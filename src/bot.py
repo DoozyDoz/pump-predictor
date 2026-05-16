@@ -14,7 +14,8 @@ from src.config import (
     TRAILING_STOP_PCT, POSITION_SIZE_PCT,
     CONFIRMATION_POLL_MINUTES, LEGACY_IMMEDIATE_ALERTS,
 )
-from src.db import db_session, init_db
+from src.db import db_session, init_db, get_last_scan_status, write_scan_status
+from src.scan_result import ScanResult
 
 API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 BINANCE_TICKER = "https://api.binance.com/api/v3/ticker/price"
@@ -228,6 +229,73 @@ def check_positions(chat_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Scan report formatting
+# ---------------------------------------------------------------------------
+def _format_scan_report(result: ScanResult, label: str) -> str:
+    """Format a ScanResult into a Telegram HTML message."""
+    if result.status == "alerts_found":
+        return f"<b>✅ {label} — {len(result.alerts)} alert(s)</b>"
+    if result.status == "no_setups":
+        return f"<b>{label} — No Pump Alerts today</b>\n0 tokens scored ≥2/3."
+    if result.status == "suppressed":
+        syms = ", ".join(result.candidate_symbols) if result.candidate_symbols else "N/A"
+        detail = result.detail or "regime filter"
+        return (
+            f"<b>⚠️ {label} — Suppressed</b>\n"
+            f"{len(result.candidate_symbols)} token(s) scored ≥2/3 but alerts are suppressed: {detail}.\n"
+            f"Symbols: {syms}"
+        )
+    if result.status == "api_failure":
+        detail = result.detail or "data source unavailable"
+        return f"<b>❌ {label} — API failure</b>\n{detail}"
+    if result.status == "no_watchlist":
+        return f"<b>{label} — No watchlist candidates</b>\nPhase 1 produced no candidates to confirm."
+    if result.status == "no_confirmations":
+        syms = ", ".join(result.candidate_symbols) if result.candidate_symbols else "N/A"
+        return (
+            f"<b>{label} — No confirmations</b>\n"
+            f"Watchlist: {syms}.\n"
+            f"Phase 2 confirmation: none passed the 4h candle check."
+        )
+    if result.status == "error":
+        detail = result.detail or "unexpected error"
+        return f"<b>❌ {label} — Error</b>\n{detail}"
+    return f"<b>{label}</b> — {result.status}"
+
+
+def _handle_poller_result(result: ScanResult, chat_id: str):
+    """Persist scan status and send Telegram only on state change."""
+    from src.db import write_scan_status, get_last_scan_status
+
+    phase = result.phase or "phase2"
+
+    # Read previous status BEFORE writing the new one
+    prev = get_last_scan_status(phase)
+    prev_status = prev["status"] if prev else None
+
+    write_scan_status(
+        phase=phase,
+        status=result.status,
+        detail=result.detail,
+        candidate_symbols=result.candidate_symbols,
+        alert_count=len(result.alerts),
+    )
+
+    state_changed = prev_status is not None and prev_status != result.status
+
+    if result:
+        # Always send when there are actionable alerts
+        for alert in result.alerts:
+            sym = alert.get("symbol", "?").replace("USDT", "")
+            send_message(chat_id,
+                f"<b>✅ Confirmed — {sym}</b>\n{alert.get('reason', '')}")
+    elif state_changed:
+        # Empty result but state changed — notify why
+        send_message(chat_id, _format_scan_report(result, "Phase 2"))
+    # If no alerts and no state change, stay silent (log only)
+
+
+# ---------------------------------------------------------------------------
 # Command handler
 # ---------------------------------------------------------------------------
 def handle_message(msg: dict):
@@ -312,21 +380,15 @@ def handle_message(msg: dict):
                     send_message(chat_id, "<b>✅ Scan complete</b> — no alerts today")
             else:
                 from src.pipeline import run_phase1_watchlist, run_phase2_confirmation
-                candidates = run_phase1_watchlist()
-                if candidates:
-                    send_message(chat_id, f"<b>✅ Phase 1 complete</b> — {len(candidates)} watchlist candidate(s)")
-                results = run_phase2_confirmation()
-                if results:
-                    confirmed = [r for r in results if r.get("confirmed")]
-                    denied = [r for r in results if r.get("denied")]
-                    msg_parts = []
-                    if confirmed:
-                        msg_parts.append(f"{len(confirmed)} confirmed")
-                    if denied:
-                        msg_parts.append(f"{len(denied)} expired")
-                    if msg_parts:
-                        send_message(chat_id, f"<b>✅ Confirmation check</b> — {', '.join(msg_parts)}")
-                send_message(chat_id, "<b>✅ Scan complete</b>")
+                p1 = run_phase1_watchlist()
+                send_message(chat_id, _format_scan_report(p1, "Phase 1"))
+
+                if p1:
+                    p2 = run_phase2_confirmation()
+                    send_message(chat_id, _format_scan_report(p2, "Phase 2"))
+                else:
+                    p2 = ScanResult(status="no_watchlist", phase="phase2")
+                    send_message(chat_id, _format_scan_report(p2, "Phase 2"))
         except Exception as e:
             send_message(chat_id, f"<b>❌ Scan failed:</b> {str(e)[:200]}")
         return
@@ -480,10 +542,9 @@ def run_bot():
                 CONFIRMATION_CHECK_INTERVAL = CONFIRMATION_POLL_MINUTES * 60
                 if now - last_confirmation_check >= CONFIRMATION_CHECK_INTERVAL:
                     from src.pipeline import run_phase2_confirmation
-                    confirmed = run_phase2_confirmation()
-                    if confirmed:
-                        send_message(TELEGRAM_CHAT_ID,
-                            f"<b>✅ Confirmation check</b> — {len(confirmed)} result(s)")
+                    result = run_phase2_confirmation()
+                    # Persist status and notify only on state change
+                    _handle_poller_result(result, TELEGRAM_CHAT_ID)
                     last_confirmation_check = now
 
         except KeyboardInterrupt:
