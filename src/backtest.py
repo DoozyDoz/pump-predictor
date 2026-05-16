@@ -581,6 +581,7 @@ def run_staged_backtest(spot_symbols: list[str], max_symbols: int = 0) -> list[B
                     phase1_candidates.append(sym)
 
             if not phase1_candidates:
+                print(f"  DEBUG {d}: 0 candidates | fund_snap={len(fund_snap)} oi_snap={len(oi_snap)} ls_snap={len(ls_snap)} taker_snap={len(taker_snap)} price_snap={len(price_snap)}")
                 continue
 
             # Phase 2: Simulate confirmation after N hours
