@@ -21,16 +21,40 @@ POLL_INTERVAL = 2       # seconds between Telegram polls
 PRICE_INTERVAL = 7200   # P&L update every 2 hours (seconds)
 TP_CHECK_INTERVAL = 1800  # check TP/SL every 30 minutes (seconds)
 
+# Emoji-prefixed button text that appears in the reply keyboard.
+# When a user taps a button, Telegram sends the exact button text as a message.
+MENU_BUTTONS = {
+    "🔍 Scan": "scan",
+    "📊 Positions": "positions",
+    "❓ Help": "help",
+}
+
+
+def build_main_menu() -> dict:
+    """Return a persistent ReplyKeyboardMarkup with common commands."""
+    return {
+        "keyboard": [
+            ["🔍 Scan", "📊 Positions"],
+            ["❓ Help"],
+        ],
+        "resize_keyboard": True,
+        "persistent": True,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Telegram helpers
 # ---------------------------------------------------------------------------
-def send_message(chat_id: str, text: str, parse_mode: str = "HTML") -> bool:
+def send_message(chat_id: str, text: str, parse_mode: str = "HTML",
+                 reply_markup: dict | None = None) -> bool:
+    payload = {
+        "chat_id": chat_id, "text": text,
+        "parse_mode": parse_mode, "disable_web_page_preview": True,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     try:
-        resp = requests.post(f"{API}/sendMessage", json={
-            "chat_id": chat_id, "text": text,
-            "parse_mode": parse_mode, "disable_web_page_preview": True,
-        }, timeout=15)
+        resp = requests.post(f"{API}/sendMessage", json=payload, timeout=15)
         return resp.status_code == 200
     except Exception:
         return False
@@ -213,6 +237,13 @@ def handle_message(msg: dict):
 
     lower = text.lower()
 
+    # Normalize menu button responses: "🔍 scan" -> "scan"
+    if lower in (k.lower() for k in MENU_BUTTONS):
+        for btn_text, cmd in MENU_BUTTONS.items():
+            if lower == btn_text.lower():
+                lower = cmd
+                break
+
     # "close SYMBOL" / "sell SYMBOL"
     if lower.startswith("close ") or lower.startswith("sell "):
         parts = text.split()
@@ -280,6 +311,13 @@ def handle_message(msg: dict):
             send_message(chat_id, f"<b>❌ Scan failed:</b> {str(e)[:200]}")
         return
 
+    # "menu" / "/menu" — re-show the keyboard
+    if lower in ("menu", "/menu"):
+        send_message(chat_id,
+            "<b>Menu shown</b> — tap a button below or type a command.",
+            reply_markup=build_main_menu())
+        return
+
     # "help" / "/help" / "start"
     if lower in ("help", "/help", "start", "/start", "hi", "hello"):
         send_message(chat_id,
@@ -289,13 +327,15 @@ def handle_message(msg: dict):
             "• <code>close SYMBOL</code> — close a tracked position\n"
             "• <code>scan</code> — run on-demand pump scan\n"
             "• <code>positions</code> — show all active positions\n"
+            "• <code>menu</code> — show command buttons\n"
             "• <code>help</code> — this message\n\n"
             "<b>Auto-alerts:</b>\n"
             "• P&L update every 2 hours\n"
             "• TP/SL checked every 30 minutes\n"
             "• Instant alert when TP1 (+15%), TP2 (+25%), or stop-loss (-7%) hit\n"
             "• Trailing stop (-3%) after TP1 hit\n\n"
-            "<i>Example: buy COS at 0.00123</i>"
+            "<i>Example: buy COS at 0.00123</i>",
+            reply_markup=build_main_menu()
         )
         return
 
@@ -363,7 +403,9 @@ def handle_message(msg: dict):
 def run_bot():
     init_db()
     print(f"Bot starting... Chat ID: {TELEGRAM_CHAT_ID}")
-    send_message(TELEGRAM_CHAT_ID, "<b>🤖 Alpha Bot online</b>\nPaper trading ready.\nReply 'help' for commands.")
+    send_message(TELEGRAM_CHAT_ID,
+        "<b>🤖 Alpha Bot online</b>\nPaper trading ready.\nTap a button below or type 'help' for commands.",
+        reply_markup=build_main_menu())
 
     offset = 0
     last_price_check = time.time()
