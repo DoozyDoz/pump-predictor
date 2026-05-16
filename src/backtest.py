@@ -581,7 +581,7 @@ def run_staged_backtest(spot_symbols: list[str], max_symbols: int = 0) -> list[B
                     phase1_candidates.append(sym)
 
             if not phase1_candidates:
-                print(f"  DEBUG {d}: 0 candidates | fund_snap={len(fund_snap)} oi_snap={len(oi_snap)} ls_snap={len(ls_snap)} taker_snap={len(taker_snap)} price_snap={len(price_snap)}")
+                print(f"  DEBUG {d}: 0 candidates | fund={len(fund_snap)} oi={len(oi_snap)} ls={len(ls_snap)} taker={len(taker_snap)} price={len(price_snap)}")
                 continue
 
             # Phase 2: Simulate confirmation after N hours
@@ -606,6 +606,8 @@ def run_staged_backtest(spot_symbols: list[str], max_symbols: int = 0) -> list[B
                 # Not confirmed: price action or volume conditions not met,
                 # or data unavailable at confirmation time.
                 # Conservative simulation: only confirm when conditions pass.
+
+            print(f"  DEBUG {d}: phase1={len(phase1_candidates)} confirmed={len(confirmed_candidates)}")
 
             if not confirmed_candidates:
                 continue
